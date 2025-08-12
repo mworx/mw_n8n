@@ -427,31 +427,31 @@ select_installation_mode() {
         
         case "$mode_choice" in
             1) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${GREEN}МАКСИМАЛЬНЫЙ${NC}"
+                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${GREEN}МАКСИМАЛЬНЫЙ${NC}" >&2
                 sleep 1
                 echo "$MODE_FULL"
-                return 
+                break
                 ;;
             2) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${BLUE}СТАНДАРТНЫЙ${NC}"
+                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${BLUE}СТАНДАРТНЫЙ${NC}" >&2
                 sleep 1
                 echo "$MODE_STANDARD"
-                return 
+                break
                 ;;
             3) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${MAGENTA}RAG-ОПТИМИЗИРОВАННЫЙ${NC}"
+                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${MAGENTA}RAG-ОПТИМИЗИРОВАННЫЙ${NC}" >&2
                 sleep 1
                 echo "$MODE_RAG"
-                return 
+                break
                 ;;
             4) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${YELLOW}МИНИМАЛЬНЫЙ${NC}"
+                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${YELLOW}МИНИМАЛЬНЫЙ${NC}" >&2
                 sleep 1
                 echo "$MODE_LIGHTWEIGHT"
-                return 
+                break
                 ;;
             *) 
-                echo -e "${RED}${CROSS_MARK}${NC} Неверный выбор. Пожалуйста, введите число от 1 до 4."
+                echo -e "${RED}${CROSS_MARK}${NC} Неверный выбор. Пожалуйста, введите число от 1 до 4." >&2
                 ;;
         esac
     done
