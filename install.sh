@@ -429,25 +429,25 @@ select_installation_mode() {
             1) 
                 echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${GREEN}МАКСИМАЛЬНЫЙ${NC}" >&2
                 sleep 1
-                echo "$MODE_FULL"
+                INSTALLATION_MODE="$MODE_FULL"
                 break
                 ;;
             2) 
                 echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${BLUE}СТАНДАРТНЫЙ${NC}" >&2
                 sleep 1
-                echo "$MODE_STANDARD"
+                INSTALLATION_MODE="$MODE_STANDARD"
                 break
                 ;;
             3) 
                 echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${MAGENTA}RAG-ОПТИМИЗИРОВАННЫЙ${NC}" >&2
                 sleep 1
-                echo "$MODE_RAG"
+                INSTALLATION_MODE="$MODE_RAG"
                 break
                 ;;
             4) 
                 echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${YELLOW}МИНИМАЛЬНЫЙ${NC}" >&2
                 sleep 1
-                echo "$MODE_LIGHTWEIGHT"
+                INSTALLATION_MODE="$MODE__LIGHTWEIGHT"
                 break
                 ;;
             *) 
@@ -1364,7 +1364,9 @@ main() {
     install_docker
     
     # Конфигурация
-    local mode=$(select_installation_mode)
+    INSTALLATION_MODE=""  # Глобальная переменная
+    select_installation_mode
+    local mode=$INSTALLATION_MODE
     local config=$(get_project_config)
     local project_name=$(echo "$config" | cut -d'|' -f1)
     local domain=$(echo "$config" | cut -d'|' -f2)
