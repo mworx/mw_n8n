@@ -151,6 +151,11 @@ show_progress() {
     local message=${3:-"Прогресс"}
     local width=50
     
+    # Защита от деления на ноль
+    if [ $total -eq 0 ]; then
+        return 0
+    fi
+    
     local percent=$((current * 100 / total))
     local filled=$((width * current / total))
     
