@@ -1195,6 +1195,8 @@ volumes:
   db-config:
 
 services:
+echo "Debug: Total services = ${#services[@]}"
+echo "Debug: Services list = ${services[@]}"
   # Traefik - реверс-прокси
   traefik:
     <<: *common
