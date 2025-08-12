@@ -697,38 +697,30 @@ INSTALL_TIMESTAMP=$TIMESTAMP
 POSTGRES_HOST=db
 POSTGRES_PORT=5432
 POSTGRES_DB=postgres
-$(echo "$credentials" | grep POSTGRES_PASSWORD)
+POSTGRES_PASSWORD=$(echo "$credentials" | grep "POSTGRES_PASSWORD" | cut -d'=' -f2)
 
 # JWT конфигурация (срок действия 20 лет)
-$(echo "$credentials" | grep JWT_SECRET)
+JWT_SECRET=$(echo "$credentials" | grep "JWT_SECRET" | cut -d'=' -f2)
 JWT_EXPIRY=315360000
-$(echo "$credentials" | grep ANON_KEY)
-$(echo "$credentials" | grep SERVICE_ROLE_KEY)
-
-# URL-адреса Supabase
-SITE_URL=https://$domain
-API_EXTERNAL_URL=https://$domain
-SUPABASE_PUBLIC_URL=https://$domain
+ANON_KEY=$(echo "$credentials" | grep "ANON_KEY" | cut -d'=' -f2)
+SERVICE_ROLE_KEY=$(echo "$credentials" | grep "SERVICE_ROLE_KEY" | cut -d'=' -f2)
 
 # Доступ к панели управления
-$(echo "$credentials" | grep DASHBOARD_USERNAME)
-$(echo "$credentials" | grep DASHBOARD_PASSWORD)
+DASHBOARD_USERNAME=$(echo "$credentials" | grep "DASHBOARD_USERNAME" | cut -d'=' -f2)
+DASHBOARD_PASSWORD=$(echo "$credentials" | grep "DASHBOARD_PASSWORD" | cut -d'=' -f2)
 
 # N8N конфигурация
-N8N_HOST=$domain
-N8N_PORT=5678
-N8N_PROTOCOL=https
-$(echo "$credentials" | grep N8N_BASIC_AUTH)
-N8N_ENCRYPTION_KEY=$(generate_password 32)
-WEBHOOK_URL=https://$domain
+N8N_BASIC_AUTH_USER=$(echo "$credentials" | grep "N8N_BASIC_AUTH_USER" | cut -d'=' -f2)
+N8N_BASIC_AUTH_PASSWORD=$(echo "$credentials" | grep "N8N_BASIC_AUTH_PASSWORD" | cut -d'=' -f2)
 
 # Redis (для режима Full)
-$(echo "$credentials" | grep REDIS_PASSWORD)
+REDIS_PASSWORD=$(echo "$credentials" | grep "REDIS_PASSWORD" | cut -d'=' -f2)
 
 # Дополнительные секреты Supabase
-$(echo "$credentials" | grep SECRET_KEY_BASE)
-$(echo "$credentials" | grep VAULT_ENC_KEY)
-$(echo "$credentials" | grep LOGFLARE)
+SECRET_KEY_BASE=$(echo "$credentials" | grep "SECRET_KEY_BASE" | cut -d'=' -f2)
+VAULT_ENC_KEY=$(echo "$credentials" | grep "VAULT_ENC_KEY" | cut -d'=' -f2)
+LOGFLARE_PUBLIC_ACCESS_TOKEN=$(echo "$credentials" | grep "LOGFLARE_PUBLIC_ACCESS_TOKEN" | cut -d'=' -f2)
+LOGFLARE_PRIVATE_ACCESS_TOKEN=$(echo "$credentials" | grep "LOGFLARE_PRIVATE_ACCESS_TOKEN" | cut -d'=' -f2)
 
 # Настройки Studio
 STUDIO_DEFAULT_ORGANIZATION=MEDIA WORKS
@@ -1281,7 +1273,38 @@ services:
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
-EOF
+
+  # Kong API Gateway
+  kong:
+    <<: *common
+    image: kong:2.8-alpine
+    container_name: supabase-kong
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
+    volumes:
+      - ./volumes/api/kong.yml:/var/lib/kong/kong.yml:ro
+
+  # Supabase Studio
+  studio:
+    <<: *common
+    image: supabase/studio:20231103-a58d427
+    container_name: supabase-studio
+    depends_on:
+      kong:
+        condition: service_started
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.studio.rule=Host(`studio.${DOMAIN}`)"
+      - "traefik.http.routers.studio.tls=true"
+      - "traefik.http.services.studio.loadbalancer.server.port=3000"
+    EOF
     
     success "Docker Compose конфигурация создана"
 }
