@@ -1,6 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
+# Проверяем, запущен ли скрипт через pipe
+if [ ! -t 0 ]; then
+    # Сохраняем скрипт и перезапускаем
+    TEMP_SCRIPT=$(mktemp)
+    cat > "$TEMP_SCRIPT"
+    chmod +x "$TEMP_SCRIPT"
+    exec bash "$TEMP_SCRIPT" "$@"
+fi
+
 # ============================================================================
 # MEDIA WORKS - Автоматизированная установка Supabase + N8N + Traefik
 # Версия: 3.0.0
@@ -383,8 +392,9 @@ install_docker() {
 # ============================ ВЫБОР РЕЖИМА УСТАНОВКИ =======================
 
 select_installation_mode() {
-    clear
-    show_media_works_logo
+    exec < /dev/tty  # Переключаем ввод на терминал    
+    # clear
+    # show_media_works_logo
     
     echo -e "\n${CYAN}${ROCKET} ВЫБЕРИТЕ РЕЖИМ УСТАНОВКИ${NC}\n"
     echo -e "${WHITE}═══════════════════════════════════════════════════════════════════════${NC}\n"
