@@ -426,33 +426,11 @@ select_installation_mode() {
         read -r mode_choice
         
         case "$mode_choice" in
-            1) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${GREEN}МАКСИМАЛЬНЫЙ${NC}" >&2
-                sleep 1
-                INSTALLATION_MODE="$MODE_FULL"
-                break
-                ;;
-            2) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${BLUE}СТАНДАРТНЫЙ${NC}" >&2
-                sleep 1
-                INSTALLATION_MODE="$MODE_STANDARD"
-                break
-                ;;
-            3) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${MAGENTA}RAG-ОПТИМИЗИРОВАННЫЙ${NC}" >&2
-                sleep 1
-                INSTALLATION_MODE="$MODE_RAG"
-                break
-                ;;
-            4) 
-                echo -e "\n${GREEN}${CHECK_MARK}${NC} Выбран режим: ${YELLOW}МИНИМАЛЬНЫЙ${NC}" >&2
-                sleep 1
-                INSTALLATION_MODE="$MODE__LIGHTWEIGHT"
-                break
-                ;;
-            *) 
-                echo -e "${RED}${CROSS_MARK}${NC} Неверный выбор. Пожалуйста, введите число от 1 до 4." >&2
-                ;;
+            1) INSTALLATION_MODE="$MODE_FULL"; break ;;
+            2) INSTALLATION_MODE="$MODE_STANDARD"; break ;;
+            3) INSTALLATION_MODE="$MODE_RAG"; break ;;
+            4) INSTALLATION_MODE="$MODE_LIGHTWEIGHT"; break ;;
+            *) echo -e "${RED}${CROSS_MARK}${NC} Неверный выбор." ;;
         esac
     done
 }
