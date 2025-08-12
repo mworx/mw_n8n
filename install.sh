@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail  # Убираем -e чтобы не выходить при ошибках
 
 # Проверяем, запущен ли скрипт через pipe
 if [ ! -t 0 ]; then
@@ -791,6 +791,7 @@ EOF
 # ============================ ЗАПУСК СЕРВИСОВ ==============================
 
 start_services_with_progress() {
+    set +e  # Временно отключаем выход при ошибке
     local project_dir=$1
     local mode=$2
     
@@ -834,7 +835,7 @@ start_services_with_progress() {
         
         local service_pid=$!
         show_spinner $service_pid "Загрузка и запуск $service"
-        wait $service_pid
+        wait $service_pid || true
         
         show_progress $current $total "Запуск сервисов"
         sleep 2
@@ -842,6 +843,7 @@ start_services_with_progress() {
     
     echo ""
     success "Все сервисы успешно запущены!"
+    set -e  # Включаем обратно
 }
 
 # ============================ ПРОВЕРКА ЗДОРОВЬЯ ============================
@@ -1195,8 +1197,6 @@ volumes:
   db-config:
 
 services:
-echo "Debug: Total services = ${#services[@]}"
-echo "Debug: Services list = ${services[@]}"
   # Traefik - реверс-прокси
   traefik:
     <<: *common
@@ -1277,7 +1277,7 @@ echo "Debug: Services list = ${services[@]}"
       start_period: 30s
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.n8n.rule=Host(\`${N8N_HOST}\`)"
+      - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
