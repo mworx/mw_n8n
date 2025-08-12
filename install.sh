@@ -448,8 +448,6 @@ select_installation_mode() {
 # ============================ КОНФИГУРАЦИЯ ПРОЕКТА =========================
 
 get_project_config() {
-    clear
-    show_media_works_logo
     
     echo -e "\n${CYAN}${GEAR} КОНФИГУРАЦИЯ ПРОЕКТА${NC}\n"
     echo -e "${WHITE}═══════════════════════════════════════════════════════════════════════${NC}\n"
@@ -508,7 +506,10 @@ get_project_config() {
     echo -e "${GREEN}${CHECK_MARK} Конфигурация сохранена!${NC}"
     sleep 2
     
-    echo "$project_name|$domain|$email|$use_ssl"
+    PROJECT_NAME="$project_name"
+    DOMAIN="$domain"
+    EMAIL="$email"
+    USE_SSL="$use_ssl"
 }
 
 # ============================ ГЕНЕРАЦИЯ ПАРОЛЕЙ ============================
@@ -1355,11 +1356,15 @@ main() {
     INSTALLATION_MODE=""  # Глобальная переменная
     select_installation_mode
     local mode=$INSTALLATION_MODE
-    local config=$(get_project_config)
-    local project_name=$(echo "$config" | cut -d'|' -f1)
-    local domain=$(echo "$config" | cut -d'|' -f2)
-    local email=$(echo "$config" | cut -d'|' -f3)
-    local use_ssl=$(echo "$config" | cut -d'|' -f4)
+    PROJECT_NAME=""
+    DOMAIN=""
+    EMAIL=""
+    USE_SSL=""
+    get_project_config  # Без захвата вывода
+    local project_name=$PROJECT_NAME
+    local domain=$DOMAIN
+    local email=$EMAIL
+    local use_ssl=$USE_SSL
     
     local project_dir="/root/$project_name"
     
