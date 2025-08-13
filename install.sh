@@ -1122,30 +1122,42 @@ else
   docker compose -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
   wait_for_postgres supabase-db || err "Supabase DB не поднялся."
 
-  # Инициализация пользователя/БД для n8n в Supabase (без heredoc, с -h localhost)
+  # Инициализация пользователя/БД для n8n в Supabase (устойчиво, с ретраями)
   info "Инициализируем пользователя и БД n8n в Supabase..."
-  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
-    psql -h localhost -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
-    -c "DO \$\$ BEGIN
-           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
-             EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-           ELSE
-             EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-           END IF;
-         END \$\$;"
+  docker exec \
+    -e PGPASSWORD="${POSTGRES_PASSWORD}" \
+    supabase-db bash -lc '
+      # Ждём готовность Postgres по TCP
+      for i in $(seq 1 30); do
+        if pg_isready -h localhost -p "${POSTGRES_PORT:-5432}" -U postgres >/dev/null 2>&1; then
+          break
+        fi
+        sleep 2
+      done
 
-  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
-    psql -h localhost -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
-    -c "SELECT 'CREATE DATABASE n8n OWNER n8n'
-        WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') \gexec"
+      psql -v ON_ERROR_STOP=1 \
+           -v N8N_PWD="'"${N8N_DB_PASSWORD}"'" \
+           -h localhost \
+           -p "${POSTGRES_PORT:-5432}" \
+           -U postgres \
+           -d "${POSTGRES_DB:-postgres}" <<'"SQL"'
+DO $body$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ''n8n'') THEN
+    EXECUTE format(''CREATE ROLE n8n LOGIN PASSWORD %L'', :'N8N_PWD');
+  ELSE
+    EXECUTE format(''ALTER ROLE n8n LOGIN PASSWORD %L'', :'N8N_PWD');
+  END IF;
 
-  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
-    psql -h localhost -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
-    -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = ''n8n'') THEN
+    CREATE DATABASE n8n OWNER n8n;
+  END IF;
+END
+$body$;
 
-
-
-
+GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
+SQL
+'
 
   # Затем весь стек
   ./scripts/manage.sh up
