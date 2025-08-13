@@ -158,7 +158,10 @@ echo
 info "Введите параметры установки (обязательные помечены *):"
 read -rp " * Имя проекта (каталог в /root): " PROJECT_NAME
 [ -n "${PROJECT_NAME:-}" ] || err "Имя проекта обязательно."
+# уберём возможный \r из ввода
+PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr -d '\r')"
 PROJECT_DIR="/root/${PROJECT_NAME}"
+
 
 read -rp " * Основной домен (example.com): " ROOT_DOMAIN
 [ -n "${ROOT_DOMAIN:-}" ] || err "Основной домен обязателен."
@@ -599,19 +602,21 @@ services:
     command:
       - |
         until pg_isready -h postgres -U postgres; do sleep 1; done
-        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
-        DO $$
-        BEGIN
-          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'n8n') THEN
-            CREATE ROLE n8n LOGIN PASSWORD '${N8N_DB_PASSWORD}';
-          END IF;
-        END$$;
-        CREATE DATABASE n8n OWNER n8n;
-        GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
-        SQL
+        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 \
+          -c "DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
+                  EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+                ELSE
+                  EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+                END IF;
+              END $$;"
+        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname='n8n'" | grep -q 1 || \
+          psql -h postgres -U postgres -d postgres -c "CREATE DATABASE n8n OWNER n8n;"
+        psql -h postgres -U postgres -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     networks: [internal]
+
 EOF
 fi
 
@@ -985,7 +990,8 @@ sleep 3
 EOF
 chmod +x "${PROJECT_DIR}/scripts/update.sh"
 
-info "Важно: для управления стеком используйте ${PROJECT_DIR}/scripts/manage.sh (он подставляет оба compose-файла)."
+info "Важно: для управления стеком используйте:"
+echo "  ${PROJECT_DIR}/scripts/manage.sh (он подставляет оба compose-файла)."
 
 # ---------- Credentials file ----------
 info "Записываем credentials..."
