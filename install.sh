@@ -181,7 +181,7 @@ health_check_all_services() {
 # ---------- Install dependencies ----------
 info "Устанавливаем зависимости (curl, git, docker, docker compose)..."
 retry_operation apt-get update -y || err "apt-get update не удалось."
-retry_operation apt-get install -y ca-certificates curl gnupg lsb-release git wget || err "Не удалось установить базовые пакеты."
+retry_operation apt-get install -y ca-certificates curl gnupg lsb-release git wget openssl || err "Не удалось установить базовые пакеты."
 
 if ! command -v docker >/dev/null 2>&1; then
   info "Устанавливаем Docker (официальный скрипт)..."
