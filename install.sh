@@ -1116,21 +1116,27 @@ else
   docker compose -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
   wait_for_postgres supabase-db || err "Supabase DB не поднялся."
 
-# Инициализация пользователя/БД для n8n в Supabase (без here-doc)
-info "Инициализируем пользователя и БД n8n в Supabase..."
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
-  psql -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
-  -c "DO \$\$ BEGIN
-         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
-           EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-         ELSE
-           EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-         END IF;
-         IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') THEN
-           CREATE DATABASE n8n OWNER n8n;
-         END IF;
-       END \$\$;" \
-  -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
+  # Инициализация пользователя/БД для n8n в Supabase (без heredoc, с -h localhost)
+  info "Инициализируем пользователя и БД n8n в Supabase..."
+  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
+    psql -h localhost -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN
+           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
+             EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+           ELSE
+             EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+           END IF;
+         END \$\$;"
+
+  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
+    psql -h localhost -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
+    -c "SELECT 'CREATE DATABASE n8n OWNER n8n'
+        WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') \gexec"
+
+  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
+    psql -h localhost -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
+    -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
+
 
 
 
