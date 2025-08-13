@@ -7,7 +7,7 @@ if [ ! -t 0 ]; then
     TEMP_SCRIPT=$(mktemp)
     cat > "$TEMP_SCRIPT"
     chmod +x "$TEMP_SCRIPT"
-    exec bash "$TEMP_SCRIPT" "$@"
+    exec bash "$TEMP_SCRIPT" "$@" < /dev/tty
 fi
 
 # ============================================================================
