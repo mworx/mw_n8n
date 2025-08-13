@@ -130,7 +130,6 @@ install_docker() {
 # ============================ ВЫБОР РЕЖИМА УСТАНОВКИ =======================
 
 select_installation_mode() {
-    exec < /dev/tty
     echo -e "\n${CYAN}${ROCKET} ВЫБЕРИТЕ РЕЖИМ УСТАНОВКИ${NC}\n"
     echo -e "${GREEN}  [1]${NC} ${BOLD}МАКСИМАЛЬНЫЙ${NC} ${GRAY}(N8N-Cluster, Redis, Supabase-Full)${NC}"
     echo -e "${BLUE}  [2]${NC} ${BOLD}СТАНДАРТНЫЙ${NC} ${GRAY}(N8N, Supabase-Full)${NC}"
@@ -155,7 +154,6 @@ select_installation_mode() {
 
 get_project_config() {
     info "Сбор конфигурации проекта..."
-    exec < /dev/tty
     read -p "$(echo -e "${ARROW} Название проекта ${GRAY}[$DEFAULT_PROJECT_NAME]${NC}: ")" p_name
     PROJECT_NAME=${p_name:-$DEFAULT_PROJECT_NAME}
 
