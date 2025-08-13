@@ -80,26 +80,78 @@ wait_for_postgres() { # container
 
 health_check_all_services() {
   local failed=()
+  local -a wait_list=()
+
+  # Универсальная функция ожидания Docker Health=healthy
+  wait_healthy() {
+    local name="$1" tries=60
+    while [ $tries -gt 0 ]; do
+      local st
+      st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || true)"
+      if [ "$st" = "healthy" ] || [ "$st" = "running" ]; then
+        return 0
+      fi
+      sleep 2
+      tries=$((tries-1))
+    done
+    return 1
+  }
+
+  # --- n8n ---
+  if ! wait_healthy n8n; then
+    # Доп.проверка «изнутри»
+    if ! docker exec n8n sh -c 'wget --spider -q http://localhost:5678/healthz' >/dev/null 2>&1; then
+      failed+=("n8n")
+    fi
+  fi
 
   if [ "${INSTALLATION_MODE}" = "light" ]; then
-    docker exec postgres pg_isready -U postgres >/dev/null 2>&1 || failed+=("PostgreSQL")
+    # --- PostgreSQL (light) ---
+    if ! wait_healthy postgres; then
+      failed+=("PostgreSQL")
+    fi
   else
-    docker exec supabase-db pg_isready -U postgres >/dev/null 2>&1 || failed+=("Supabase PostgreSQL")
+    # --- Supabase DB ---
+    if ! wait_healthy supabase-db; then
+      failed+=("Supabase PostgreSQL")
+    fi
+
+    # --- Supabase REST (PostgREST) ---
+    if ! wait_healthy supabase-rest; then
+      # внутренняя проверка
+      if ! docker exec supabase-rest sh -c 'wget --spider -q http://localhost:3000/ready' >/dev/null 2>&1; then
+        failed+=("Supabase REST")
+      fi
+    fi
+
+    # --- Supabase Auth (GoTrue) ---
+    if ! wait_healthy supabase-auth; then
+      if ! docker exec supabase-auth sh -c 'wget --spider -q http://localhost:9999/health' >/dev/null 2>&1; then
+        failed+=("Supabase Auth")
+      fi
+    fi
+
+    # --- Supabase Kong ---
+    # У upstream нет встроенного healthcheck; проверим, что HTTP слушает/отдаёт что-то
+    if ! docker exec supabase-kong sh -c 'wget --spider -q http://localhost:8000/ || wget --spider -q http://localhost:8000/health || wget --spider -q http://localhost:8000/status' >/dev/null 2>&1; then
+      failed+=("Supabase Kong")
+    fi
   fi
 
-  curl -sf "http://localhost:5678/healthz" >/dev/null 2>&1 || failed+=("n8n")
-
-  if [ "${INSTALLATION_MODE}" != "light" ]; then
-    curl -sf "http://localhost:8000/health" >/dev/null 2>&1 || failed+=("Supabase Kong")
-    curl -sf "http://localhost:3000/ready"  >/dev/null 2>&1 || failed+=("Supabase REST")
-    curl -sf "http://localhost:9999/health" >/dev/null 2>&1 || failed+=("Supabase Auth")
+  # --- Traefik (теперь с ping и healthcheck) ---
+  if ! wait_healthy traefik; then
+    # резервная проверка ping’а с хоста
+    if ! curl -sf "http://localhost:8080/ping" >/dev/null 2>&1; then
+      failed+=("Traefik")
+    fi
   fi
 
-  curl -sf "http://localhost:8080/ping" >/dev/null 2>&1 || failed+=("Traefik")
-
-  if [ ${#failed[@]} -gt 0 ]; then err "Следующие сервисы не прошли health check: ${failed[*]}"; fi
+  if [ ${#failed[@]} -gt 0 ]; then
+    err "Следующие сервисы не прошли health check: ${failed[*]}"
+  fi
   ok "Все сервисы работают корректно ✓"
 }
+
 
 # ---------- Ask inputs ----------
 echo
@@ -394,6 +446,8 @@ services:
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.ping.address=:8080"
+      - "--ping=true"
+      - "--ping.entrypoint=ping"
       - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.myresolver.acme.storage=/acme/acme.json"
       - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
@@ -408,6 +462,11 @@ services:
       - ./volumes/traefik/acme.json:/acme/acme.json
     networks:
       - web
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6      
 
   # n8n - main
   n8n:
@@ -882,6 +941,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ./scripts/manage.sh pull
 ./scripts/manage.sh up
+# Подождём, пока Traefik и (если не light) базовые сервисы получат healthy
+sleep 3
 EOF
 chmod +x "${PROJECT_DIR}/scripts/update.sh"
 
