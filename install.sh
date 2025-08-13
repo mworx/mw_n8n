@@ -482,15 +482,21 @@ info "Готовим Docker Compose файлы..."
 # 1) Для full/standard: подтягиваем базовый compose + нужные volumes из репо
 if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ]; then
   cp /root/supabase/docker/docker-compose.yml "${PROJECT_DIR}/compose.supabase.yml"
-  # Обязательные каталоги/файлы для vector/db/pooler
-  mkdir -p "${PROJECT_DIR}/volumes/logs" "${PROJECT_DIR}/volumes/db" "${PROJECT_DIR}/volumes/pooler"
-  cp -rT /root/supabase/docker/volumes/logs   "${PROJECT_DIR}/volumes/logs"
-  cp -rT /root/supabase/docker/volumes/db     "${PROJECT_DIR}/volumes/db"
-  cp -rT /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/pooler"
-  # Для Kong нужен файл ./volumes/api/kong.yml
-  mkdir -p "${PROJECT_DIR}/volumes/api"
-  cp -rT /root/supabase/docker/volumes/api "${PROJECT_DIR}/volumes/api"  
+
+  # Чистим целевые каталоги на случай предыдущих неудачных копирований
+  rm -rf "${PROJECT_DIR}/volumes/logs" \
+         "${PROJECT_DIR}/volumes/db" \
+         "${PROJECT_DIR}/volumes/pooler" \
+         "${PROJECT_DIR}/volumes/api"
+
+  # Копируем папки целиком (без -T), чтобы сохранить структуру как в репо
+  mkdir -p "${PROJECT_DIR}/volumes"
+  cp -a /root/supabase/docker/volumes/logs   "${PROJECT_DIR}/volumes/"
+  cp -a /root/supabase/docker/volumes/db     "${PROJECT_DIR}/volumes/"
+  cp -a /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/"
+  cp -a /root/supabase/docker/volumes/api    "${PROJECT_DIR}/volumes/"
 fi
+
 
 # db не должен стопориться, если vector «unhealthy»
 if [ -f "${PROJECT_DIR}/compose.supabase.yml" ]; then
