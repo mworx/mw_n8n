@@ -1040,8 +1040,8 @@ display_final_summary() {
     local domain=$2
     local mode=$3
     
-    clear
-    show_media_works_logo
+#    clear
+#    show_media_works_logo
     
     echo -e "\n${GREEN}${SPARKLES} УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ${SPARKLES}${NC}\n"
     
