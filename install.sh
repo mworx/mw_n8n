@@ -263,6 +263,7 @@ sed -i "s/^SERVICE_ROLE_KEY=.*/SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}/" "${PROJECT
   echo "SITE_URL=https://${STUDIO_HOST}"
   echo "INSTALLATION_MODE=${INSTALLATION_MODE}"
 } >> "${PROJECT_DIR}/.env"
+  echo "DOCKER_SOCKET_LOCATION=/var/run/docker.sock" >> "${PROJECT_DIR}/.env"
 
 if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
   {
@@ -353,6 +354,9 @@ info "Готовим Docker Compose файлы..."
 # Базовый supabase compose (для full/standard): используем upstream файл отдельно
 if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ]; then
   cp /root/supabase/docker/docker-compose.yml "${PROJECT_DIR}/compose.supabase.yml"
+  # ВАЖНО: подтягиваем все файлы, на которые ссылается compose (vector.yml, sql-скрипты и т.п.)
+  mkdir -p "${PROJECT_DIR}/volumes"
+  cp -r /root/supabase/docker/volumes/* "${PROJECT_DIR}/volumes/"
 fi
 
 # override: Traefik + n8n + лейблы для проксирования supabase (kong/studio)
@@ -869,6 +873,8 @@ cd "$(dirname "$0")/.."
 ./scripts/manage.sh up
 EOF
 chmod +x "${PROJECT_DIR}/scripts/update.sh"
+
+info "Важно: для управления стеком используйте ${PROJECT_DIR}/scripts/manage.sh (он подставляет оба compose-файла)."
 
 # ---------- Credentials file ----------
 info "Записываем credentials..."
