@@ -123,12 +123,6 @@ show_spinner() {
     local spinners=(
         "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         "◐◓◑◒"
-        "◰◳◲◱"
-        "▖▘▝▗"
-        "■□▪▫"
-        "▌▀▐▄"
-        "⠁⠂⠄⡀⢀⠠⠐⠈"
-        "▁▂▃▄▅▆▇█▇▆▅▄▃▂▁"
     )
     
     local spinner=${spinners[0]}
@@ -136,12 +130,12 @@ show_spinner() {
     local i=0
     
     while kill -0 $pid 2>/dev/null; do
-        printf "\r${CYAN}[${spinner:i:1}]${NC} ${message}"
+        printf "\r${CYAN}[${spinner:i:1}]${NC} ${message}" >&2
         i=$(( (i+1) % ${#spinner} ))
         sleep $delay
     done
     
-    printf "\r${GREEN}[${CHECK_MARK}]${NC} ${message} ${GREEN}Готово!${NC}\n"
+    printf "\r${GREEN}[${CHECK_MARK}]${NC} ${message} ${GREEN}Готово!${NC}\n" >&2
 }
 
 # Прогресс-бар
@@ -151,7 +145,6 @@ show_progress() {
     local message=${3:-"Прогресс"}
     local width=50
     
-    # Защита от деления на ноль
     if [ $total -eq 0 ]; then
         return 0
     fi
@@ -159,52 +152,42 @@ show_progress() {
     local percent=$((current * 100 / total))
     local filled=$((width * current / total))
     
-    printf "\r${message}: ["
-    printf "%${filled}s" | tr ' ' '█'
-    printf "%$((width - filled))s" | tr ' ' '▒'
-    printf "] ${percent}%% "
+    printf "\r${message}: [" >&2
+    printf "%${filled}s" | tr ' ' '█' >&2
+    printf "%$((width - filled))s" | tr ' ' '▒' >&2
+    printf "] ${percent}%% " >&2
     
     if [ $current -eq $total ]; then
-        echo -e " ${GREEN}${CHECK_MARK} Завершено!${NC}"
+        echo -e " ${GREEN}${CHECK_MARK} Завершено!${NC}" >&2
     fi
-}
-
-# Анимированное сообщение
-animate_text() {
-    local text="$1"
-    local delay=${2:-0.03}
-    
-    for (( i=0; i<${#text}; i++ )); do
-        echo -n "${text:$i:1}"
-        sleep $delay
-    done
-    echo ""
 }
 
 # ============================ ФУНКЦИИ ЛОГИРОВАНИЯ ==========================
 
 log() {
-    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $*" | tee -a "${LOG_FILE}"
+    # Эта функция пишет в лог, ее можно оставить как есть или тоже перенаправить
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $*" | tee -a "${LOG_FILE}" >&2
 }
 
 error() {
     echo -e "\n${RED}${CROSS_MARK} ОШИБКА:${NC} $*" | tee -a "${LOG_FILE}" >&2
-    echo -e "${YELLOW}Проверьте лог-файл: ${LOG_FILE}${NC}"
+    echo -e "${YELLOW}Проверьте лог-файл: ${LOG_FILE}${NC}" >&2
     exit 1
 }
 
 warning() {
-    echo -e "${YELLOW}⚠ ПРЕДУПРЕЖДЕНИЕ:${NC} $*" | tee -a "${LOG_FILE}"
+    echo -e "${YELLOW}⚠ ПРЕДУПРЕЖДЕНИЕ:${NC} $*" | tee -a "${LOG_FILE}" >&2
 }
 
 info() {
     echo -e "${BLUE}ℹ ИНФОРМАЦИЯ:${NC} $*" >> "${LOG_FILE}"
-    echo -e "${BLUE}ℹ ИНФОРМАЦИЯ:${NC} $*"
+    echo -e "${BLUE}ℹ ИНФОРМАЦИЯ:${NC} $*" >&2
 }
 
 success() {
-    echo -e "${GREEN}${CHECK_MARK}${NC} $*" | tee -a "${LOG_FILE}"
+    echo -e "${GREEN}${CHECK_MARK}${NC} $*" | tee -a "${LOG_FILE}" >&2
 }
+
 
 # ============================ СИСТЕМНЫЕ ПРОВЕРКИ ============================
 
@@ -634,13 +617,16 @@ create_project_structure() {
 # ============================ ГЕНЕРАЦИЯ УЧЕТНЫХ ДАННЫХ ====================
 
 generate_credentials() {
-    echo -e "\n${CYAN}${KEY} Генерация безопасных учетных данных...${NC}\n"
+    # Весь декоративный вывод должен идти в stderr
+    echo -e "\n${CYAN}${KEY} Генерация безопасных учетных данных...${NC}\n" >&2
     
     local jwt_secret=$(generate_jwt_secret)
+    # Вызов generate_jwt_tokens теперь безопасен, т.к. info() пишет в stderr
     local jwt_tokens=$(generate_jwt_tokens "$jwt_secret")
     local anon_key=$(echo "$jwt_tokens" | cut -d'|' -f1)
     local service_key=$(echo "$jwt_tokens" | cut -d'|' -f2)
     
+    # show_progress теперь безопасно использовать, т.к. она пишет в stderr
     show_progress 1 5 "Генерация паролей"
     sleep 0.5
     show_progress 2 5 "Генерация паролей"
@@ -651,6 +637,7 @@ generate_credentials() {
     sleep 0.5
     show_progress 5 5 "Генерация паролей"
     
+    # В stdout выводится ТОЛЬКО нужный результат
     cat << EOF
 JWT_SECRET=$jwt_secret
 ANON_KEY=$anon_key
