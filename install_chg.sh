@@ -100,19 +100,24 @@ fi
 # ----------------------------- Проверка портов 80/443 -------------------------
 check_and_free_port() {
   local port="$1"
-  if ss -ltn '( sport = :'"$port"' )' | awk 'NR>1{exit 0} END{exit 1}'; then
-    return 0 # свободен
+  # true => порт СВОБОДЕН, false => порт ЗАНЯТ
+  if ss -ltn "( sport = :${port} )" | awk 'NR==1{next} {found=1} END{exit (found?1:0)}'; then
+    # нет ни одной строки после заголовка => свободен
+    return 0
   fi
-  warn "Порт $port занят. Попытка остановить nginx/apache2..."
+
+  warn "Порт ${port} занят. Попытка остановить nginx/apache2..."
   systemctl stop nginx 2>/dev/null || true
   systemctl stop apache2 2>/dev/null || true
   sleep 1
-  if ss -ltn '( sport = :'"$port"' )' | awk 'NR>1{exit 0} END{exit 1}'; then
+
+  if ss -ltn "( sport = :${port} )" | awk 'NR==1{next} {found=1} END{exit (found?1:0)}'; then
     return 0
   fi
-  warn "Порт $port по-прежнему занят. Traefik/ACME могут не заработать."
+  warn "Порт ${port} по-прежнему занят. Traefik/ACME могут не заработать."
   return 1
 }
+
 check_and_free_port 80 || true
 check_and_free_port 443 || true
 
@@ -761,6 +766,9 @@ fi
 cat > "$SCRIPTS_DIR/manage.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# включить отладку при экспортированной переменной DEBUG=1
+[ "${DEBUG:-0}" = "1" ] && set -x
+trap 'echo -e "\n${RED}[ ERROR ]${NC} Ошибка на строке $LINENO"; exit 1' ERR
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 COMPOSE_MAIN="$ROOT_DIR/docker-compose.yml"
