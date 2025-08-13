@@ -139,7 +139,7 @@ fi
 
 # Копируем полный compose Supabase (НЕ МОДИФИЦИРУЕМ)
 cp /root/supabase/docker/docker-compose.yml "${PROJECT_DIR}/compose.supabase.yml"
-# Копируем необходимые volume-заготовки (как в репо)
+# Копируем необходимые volume-заготовки
 rm -rf "${PROJECT_DIR}/volumes/logs" "${PROJECT_DIR}/volumes/db" "${PROJECT_DIR}/volumes/pooler" "${PROJECT_DIR}/volumes/api"
 cp -a /root/supabase/docker/volumes/logs   "${PROJECT_DIR}/volumes/"
 cp -a /root/supabase/docker/volumes/db     "${PROJECT_DIR}/volumes/"
@@ -163,6 +163,48 @@ N8N_ENCRYPTION_KEY="$(gen_alnum 32)"
 REDIS_PASSWORD="$(gen_alnum 24)"
 N8N_PG_PASSWORD="$(gen_alnum 32)"
 
+# Дополнительные ключи/дефолты для Supabase (чтобы не было WARN и падений)
+SECRET_KEY_BASE="$(gen_alnum 64)"
+VAULT_ENC_KEY="$(gen_alnum 64)"
+LOGFLARE_PUBLIC_ACCESS_TOKEN="$(gen_alnum 48)"
+LOGFLARE_PRIVATE_ACCESS_TOKEN="$(gen_alnum 48)"
+
+POOLER_PROXY_PORT_TRANSACTION="6543"
+POOLER_DEFAULT_POOL_SIZE="20"
+POOLER_MAX_CLIENT_CONN="100"
+POOLER_TENANT_ID="${PROJECT_NAME}"
+POOLER_DB_POOL_SIZE="5"
+
+IMGPROXY_ENABLE_WEBP_DETECTION="true"
+PGRST_DB_SCHEMAS="public"
+JWT_EXPIRY="630720000" # ~20 лет
+
+STUDIO_DEFAULT_ORGANIZATION="MEDIA WORKS"
+STUDIO_DEFAULT_PROJECT="${PROJECT_NAME}"
+
+FUNCTIONS_VERIFY_JWT="false"
+ADDITIONAL_REDIRECT_URLS=""
+DISABLE_SIGNUP="false"
+ENABLE_EMAIL_SIGNUP="false"
+ENABLE_ANONYMOUS_USERS="true"
+ENABLE_EMAIL_AUTOCONFIRM="false"
+ENABLE_PHONE_SIGNUP="false"
+ENABLE_PHONE_AUTOCONFIRM="false"
+MAILER_URLPATHS_CONFIRMATION="/auth/v1/verify"
+MAILER_URLPATHS_INVITE="/auth/v1/verify"
+MAILER_URLPATHS_RECOVERY="/auth/v1/verify"
+MAILER_URLPATHS_EMAIL_CHANGE="/auth/v1/verify"
+
+# Если пользователь включил SMTP — скорректируем флаги
+if [[ "${WANT_SMTP}" =~ ^[Yy]$ ]]; then
+  ENABLE_EMAIL_SIGNUP="true"
+  ENABLE_ANONYMOUS_USERS="false"
+  ENABLE_EMAIL_AUTOCONFIRM="true"
+fi
+
+# Где лежит docker.sock (нужно Supabase compose, иначе invalid spec)
+DOCKER_SOCKET_LOCATION="/var/run/docker.sock"
+
 # ---------- .env ----------
 info "Формируем .env..."
 cat > "${PROJECT_DIR}/.env" <<EOF
@@ -183,6 +225,7 @@ POSTGRES_PORT=5432
 JWT_SECRET=${JWT_SECRET}
 ANON_KEY=${ANON_KEY}
 SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}
+JWT_EXPIRY=${JWT_EXPIRY}
 
 DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
 DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
@@ -192,6 +235,42 @@ SITE_URL=https://${STUDIO_HOST}
 API_EXTERNAL_URL=https://${API_HOST}
 KONG_HTTP_PORT=8000
 KONG_HTTPS_PORT=8443
+
+# Vector / Docker socket (для compose.supabase.yml)
+DOCKER_SOCKET_LOCATION=${DOCKER_SOCKET_LOCATION}
+IMGPROXY_ENABLE_WEBP_DETECTION=${IMGPROXY_ENABLE_WEBP_DETECTION}
+PGRST_DB_SCHEMAS=${PGRST_DB_SCHEMAS}
+
+# Studio defaults
+STUDIO_DEFAULT_ORGANIZATION=${STUDIO_DEFAULT_ORGANIZATION}
+STUDIO_DEFAULT_PROJECT=${STUDIO_DEFAULT_PROJECT}
+
+# Auth toggles
+ENABLE_EMAIL_SIGNUP=${ENABLE_EMAIL_SIGNUP}
+ENABLE_ANONYMOUS_USERS=${ENABLE_ANONYMOUS_USERS}
+ENABLE_EMAIL_AUTOCONFIRM=${ENABLE_EMAIL_AUTOCONFIRM}
+ENABLE_PHONE_SIGNUP=${ENABLE_PHONE_SIGNUP}
+ENABLE_PHONE_AUTOCONFIRM=${ENABLE_PHONE_AUTOCONFIRM}
+FUNCTIONS_VERIFY_JWT=${FUNCTIONS_VERIFY_JWT}
+ADDITIONAL_REDIRECT_URLS=${ADDITIONAL_REDIRECT_URLS}
+DISABLE_SIGNUP=${DISABLE_SIGNUP}
+MAILER_URLPATHS_CONFIRMATION=${MAILER_URLPATHS_CONFIRMATION}
+MAILER_URLPATHS_INVITE=${MAILER_URLPATHS_INVITE}
+MAILER_URLPATHS_RECOVERY=${MAILER_URLPATHS_RECOVERY}
+MAILER_URLPATHS_EMAIL_CHANGE=${MAILER_URLPATHS_EMAIL_CHANGE}
+
+# Логи/секреты Supabase
+SECRET_KEY_BASE=${SECRET_KEY_BASE}
+VAULT_ENC_KEY=${VAULT_ENC_KEY}
+LOGFLARE_PUBLIC_ACCESS_TOKEN=${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+LOGFLARE_PRIVATE_ACCESS_TOKEN=${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+
+# Supavisor Pooler
+POOLER_PROXY_PORT_TRANSACTION=${POOLER_PROXY_PORT_TRANSACTION}
+POOLER_DEFAULT_POOL_SIZE=${POOLER_DEFAULT_POOL_SIZE}
+POOLER_MAX_CLIENT_CONN=${POOLER_MAX_CLIENT_CONN}
+POOLER_TENANT_ID=${POOLER_TENANT_ID}
+POOLER_DB_POOL_SIZE=${POOLER_DB_POOL_SIZE}
 
 # n8n / Redis
 N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -218,10 +297,7 @@ sed -i 's/[[:space:]]*$//' "${PROJECT_DIR}/.env"
 sed -i 's/\r$//' "${PROJECT_DIR}/.env"
 grep -E '^[A-Z0-9_]+=' "${PROJECT_DIR}/.env" >/dev/null || err "Invalid .env format (нет KEY=VALUE)."
 
-# ---------- Traefik (без middlewares, максимально просто) ----------
-# Отдельного traefik.yml не требуется: всё через command флаги.
-# acme.json уже создан и chmod 600.
-# ---------- Docker Compose (проектная часть) ----------
+# ---------- Docker Compose (проектная часть, без middlewares) ----------
 info "Создаём docker-compose.yml для Traefik + n8n + postgres-n8n + redis..."
 cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
 x-common: &common
@@ -250,7 +326,6 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./volumes/traefik/acme.json:/acme/acme.json
-
     healthcheck:
       test: ["CMD","wget","--spider","-q","http://localhost:80"]
       interval: 10s
@@ -366,9 +441,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < .env
 set +a
 
-# Запускаем два compose-файла вместе (Supabase полный + наш стек)
 docker compose -f compose.supabase.yml -f docker-compose.yml "${@:-up}" -d || {
-  # если команда не up/down/logs, повторим без -d
   case "${1:-}" in
     up) exit 1;;
     down|ps|pull|restart) docker compose -f compose.supabase.yml -f docker-compose.yml "$@" ;;
@@ -471,16 +544,14 @@ pushd "${PROJECT_DIR}" >/dev/null
 # ---------- Упрощённые health-checks ----------
 info "Проверяем статусы контейнеров..."
 sleep 5
-docker compose -f compose.supabase.yml -f docker-compose.yml ps
+docker compose -f compose.supabase.yml -f docker-compose.yml ps || true
 
-# Базовые проверки: pg_isready для обеих БД, HTTP-пинги для n8n и Kong
 check_ok=1
 docker exec postgres-n8n pg_isready -U postgres >/dev/null 2>&1 || { warn "postgres-n8n ещё не готов"; check_ok=0; }
 docker exec supabase-db pg_isready -U postgres >/dev/null 2>&1 || { warn "supabase-db ещё не готов"; check_ok=0; }
 
 docker exec n8n wget --spider -q http://localhost:5678/healthz || { warn "n8n healthz не отвечает"; check_ok=0; }
 docker exec supabase-kong wget --spider -q http://localhost:8000/ || { warn "Kong (API) не отвечает на 8000"; check_ok=0; }
-
 docker exec traefik wget --spider -q http://localhost:80 || { warn "Traefik HTTP не отвечает"; check_ok=0; }
 
 popd >/dev/null
