@@ -242,7 +242,7 @@ MAILER_URLPATHS_INVITE="/auth/v1/verify"
 MAILER_URLPATHS_RECOVERY="/auth/v1/verify"
 MAILER_URLPATHS_EMAIL_CHANGE="/auth/v1/verify"
 : "${SMTP_HOST:=}"
-: "${SMTP_PORT:=}"
+: "${SMTP_PORT:=587}"        # ВАЖНО: число, иначе GoTrue падает
 : "${SMTP_USER:=}"
 : "${SMTP_PASS:=}"
 : "${SMTP_SENDER_NAME:=}"
@@ -360,7 +360,7 @@ cat > "${PROJECT_DIR}/configs/traefik/traefik.yml" <<EOF
 entryPoints:
   web: { address: ":80" }
   websecure: { address: ":443" }
-  ping: { address: ":8080" }
+  ping: { address: ":8090" }   # было :8080
 
 api: { dashboard: false }
 ping: {}
@@ -378,6 +378,7 @@ certificatesResolvers:
       storage: /acme/acme.json
       httpChallenge: { entryPoint: web }
 EOF
+
 
 cat > "${PROJECT_DIR}/configs/traefik/dynamic/security.yml" <<'EOF'
 http:
@@ -441,13 +442,13 @@ services:
       - "--providers.docker.network=${PROJECT_WEB_NET}"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.ping.address=:8080"
+      - "--entrypoints.ping.address=:8090"   # было :8080
       - "--ping=true"
       - "--ping.entrypoint=ping"
       - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.myresolver.acme.storage=/acme/acme.json"
       - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
-    ports: [ "80:80", "443:443", "8080:8080" ]
+    ports: [ "80:80", "443:443", "8090:8090" ]   # было 8080:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./configs/traefik/traefik.yml:/traefik.yml:ro
@@ -455,7 +456,7 @@ services:
       - ./volumes/traefik/acme.json:/acme/acme.json
     networks: [ web ]
     healthcheck:
-      test: ["CMD","wget","--spider","-q","http://localhost:8080/ping"]
+      test: ["CMD","wget","--spider","-q","http://localhost:8090/ping"]  # было 8080
       interval: 10s
       timeout: 5s
       retries: 6
@@ -494,19 +495,14 @@ services:
     command:
       - |
         until pg_isready -h postgres-n8n -U postgres; do sleep 1; done
-        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 \
-          -c "DO $$ BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
-                  EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-                ELSE
-                  EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-                END IF;
-                IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') THEN
-                  CREATE DATABASE n8n OWNER n8n;
-                END IF;
-              END $$;"
-        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 \
-          -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
+        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+          "SELECT 'CREATE ROLE n8n LOGIN PASSWORD ''${N8N_DB_PASSWORD}'';' \
+           WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='n8n') \gexec"
+        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+          "SELECT 'CREATE DATABASE n8n OWNER n8n' \
+           WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname=''n8n'') \gexec"
+        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+          "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
     environment:
       PGPASSWORD: ${N8N_DB_PASSWORD}
     networks: [ internal ]
