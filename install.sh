@@ -8,11 +8,10 @@ set -euo pipefail
 
 # ---------- Colors ----------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-
-ok()       { echo -e "${GREEN}[ OK ]${NC} $*"; }
-info()     { echo -e "${BLUE}[ INFO ]${NC} $*"; }
-warn()     { echo -e "${YELLOW}[ WARN ]${NC} $*"; }
-err()      { echo -e "${RED}[ ERROR ]${NC} $*"; exit 1; }
+ok()   { echo -e "${GREEN}[ OK ]${NC} $*"; }
+info() { echo -e "${BLUE}[ INFO ]${NC} $*"; }
+warn() { echo -e "${YELLOW}[ WARN ]${NC} $*"; }
+err()  { echo -e "${RED}[ ERROR ]${NC} $*"; exit 1; }
 
 banner() {
 cat <<'BANNER'
@@ -32,8 +31,7 @@ banner
 
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  OS_ID="${ID:-}"
-  OS_NAME="${NAME:-}"
+  OS_ID="${ID:-}"; OS_NAME="${NAME:-}"
 else
   err "Не удалось определить дистрибутив (нет /etc/os-release)."
 fi
@@ -43,10 +41,69 @@ case "$OS_ID" in
   *) err "Поддерживаются только Debian/Ubuntu. Обнаружено: $OS_NAME" ;;
 esac
 
+# ---------- Helpers ----------
+retry_operation() {
+  local max_attempts=3 delay=5 attempt=1
+  while [ $attempt -le $max_attempts ]; do
+    if "$@"; then return 0; fi
+    warn "Попытка $attempt из $max_attempts не удалась. Повтор через ${delay}s..."
+    sleep "$delay"; attempt=$((attempt+1))
+  done
+  return 1
+}
+
+gen_alnum() { # length
+  local len="${1:-32}"
+  ( set +o pipefail; tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len" ) || true
+}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+jwt_hs256() { # jwt_hs256 <secret> <json-payload>
+  local secret="$1" payload="$2"
+  local header='{"alg":"HS256","typ":"JWT"}'
+  local h b s
+  h=$(printf '%s' "$header" | b64url)
+  b=$(printf '%s' "$payload" | b64url)
+  s=$(printf '%s' "${h}.${b}" | openssl dgst -binary -sha256 -hmac "$secret" | b64url)
+  printf '%s.%s.%s' "$h" "$b" "$s"
+}
+
+wait_for_postgres() { # container
+  local svc="$1" max=30 i=1
+  while [ $i -le $max ]; do
+    if docker exec "$svc" pg_isready -U postgres >/dev/null 2>&1; then return 0; fi
+    sleep 2; i=$((i+1))
+  done
+  return 1
+}
+
+health_check_all_services() {
+  local failed=()
+
+  if [ "${INSTALLATION_MODE}" = "light" ]; then
+    docker exec postgres pg_isready -U postgres >/dev/null 2>&1 || failed+=("PostgreSQL")
+  else
+    docker exec supabase-db pg_isready -U postgres >/dev/null 2>&1 || failed+=("Supabase PostgreSQL")
+  fi
+
+  curl -sf "http://localhost:5678/healthz" >/dev/null 2>&1 || failed+=("n8n")
+
+  if [ "${INSTALLATION_MODE}" != "light" ]; then
+    curl -sf "http://localhost:8000/health" >/dev/null 2>&1 || failed+=("Supabase Kong")
+    curl -sf "http://localhost:3000/ready"  >/dev/null 2>&1 || failed+=("Supabase REST")
+    curl -sf "http://localhost:9999/health" >/dev/null 2>&1 || failed+=("Supabase Auth")
+  fi
+
+  curl -sf "http://localhost:8080/ping" >/dev/null 2>&1 || failed+=("Traefik")
+
+  if [ ${#failed[@]} -gt 0 ]; then err "Следующие сервисы не прошли health check: ${failed[*]}"; fi
+  ok "Все сервисы работают корректно ✓"
+}
+
 # ---------- Ask inputs ----------
 echo
 info "Введите параметры установки (обязательные помечены *):"
-
 read -rp " * Имя проекта (каталог в /root): " PROJECT_NAME
 [ -n "${PROJECT_NAME:-}" ] || err "Имя проекта обязательно."
 PROJECT_DIR="/root/${PROJECT_NAME}"
@@ -58,7 +115,6 @@ DEFAULT_N8N_SUB="n8n.${ROOT_DOMAIN}"
 read -rp " * Поддомен для n8n [${DEFAULT_N8N_SUB}]: " N8N_HOST
 N8N_HOST="${N8N_HOST:-$DEFAULT_N8N_SUB}"
 
-# Необязательные — с дефолтами
 DEF_STUDIO="studio.${ROOT_DOMAIN}"
 read -rp "   Поддомен Supabase Studio [${DEF_STUDIO}]: " STUDIO_HOST
 STUDIO_HOST="${STUDIO_HOST:-$DEF_STUDIO}"
@@ -70,7 +126,6 @@ API_HOST="${API_HOST:-$DEF_API}"
 read -rp " * Email для Let's Encrypt: " ACME_EMAIL
 [ -n "${ACME_EMAIL:-}" ] || err "Email обязателен для ACME."
 
-# SMTP (опционально)
 read -rp "Установить и настроить SMTP параметры для Supabase? (y/N): " WANT_SMTP
 WANT_SMTP="${WANT_SMTP:-N}"
 if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
@@ -101,84 +156,6 @@ case "${MODE_SEL:-}" in
 esac
 ok "Режим: ${INSTALLATION_MODE^^}"
 
-# ---------- Helpers ----------
-retry_operation() {
-  local max_attempts=3 delay=5 attempt=1
-  while [ $attempt -le $max_attempts ]; do
-    if "$@"; then return 0; fi
-    warn "Попытка $attempt из $max_attempts не удалась. Повтор через ${delay}s..."
-    sleep "$delay"; attempt=$((attempt+1))
-  done
-  return 1
-}
-
-gen_alnum() { # length
-  local len="${1:-32}"
-  # избегаем SIGPIPE при pipefail: запускаем генерацию в подсhell без pipefail
-  ( set +o pipefail; tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len" ) || true
-}
-b64url() { # stdin -> base64url (no padding)
-  openssl base64 -A | tr '+/' '-_' | tr -d '='
-}
-
-jwt_hs256() { # jwt_hs256 <secret> <json-payload>
-  local secret="$1"; shift
-  local payload="$1"
-  local header='{"alg":"HS256","typ":"JWT"}'
-  local h b s
-  h=$(printf '%s' "$header" | b64url)
-  b=$(printf '%s' "$payload" | b64url)
-  s=$(printf '%s' "${h}.${b}" | openssl dgst -binary -sha256 -hmac "$secret" | b64url)
-  printf '%s.%s.%s' "$h" "$b" "$s"
-}
-
-escape_for_sed() { # escape regex special chars
-  printf '%s\n' "$1" | sed -e 's/[[\.*^$()+?{|]/\\&/g'
-}
-
-wait_for_postgres() { # container
-  local svc="$1" max=30 i=1
-  while [ $i -le $max ]; do
-    if docker exec "$svc" pg_isready -U postgres >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 2; i=$((i+1))
-  done
-  return 1
-}
-
-health_check_all_services() {
-  local failed=()
-
-  # PostgreSQL (supabase-db or postgres)
-  if [ "$INSTALLATION_MODE" = "light" ]; then
-    if ! docker exec postgres pg_isready -U postgres >/dev/null 2>&1; then failed+=("PostgreSQL"); fi
-  else
-    if ! docker exec supabase-db pg_isready -U postgres >/dev/null 2>&1; then failed+=("Supabase PostgreSQL"); fi
-  fi
-
-  # n8n
-  if ! curl -sf "http://localhost:5678/healthz" >/dev/null 2>&1; then failed+=("n8n"); fi
-
-  # Supabase components (skip for light)
-  if [ "$INSTALLATION_MODE" != "light" ]; then
-    # Kong
-    if ! curl -sf "http://localhost:8000/health" >/dev/null 2>&1; then failed+=("Supabase Kong"); fi
-    # PostgREST
-    if ! curl -sf "http://localhost:3000/ready"  >/dev/null 2>&1; then failed+=("Supabase REST"); fi
-    # Auth
-    if ! curl -sf "http://localhost:9999/health" >/dev/null 2>&1; then failed+=("Supabase Auth"); fi
-  fi
-
-  # Traefik ping
-  if ! curl -sf "http://localhost:8080/ping" >/dev/null 2>&1; then failed+=("Traefik"); fi
-
-  if [ ${#failed[@]} -gt 0 ]; then
-    err "Следующие сервисы не прошли health check: ${failed[*]}"
-  fi
-  ok "Все сервисы работают корректно ✓"
-}
-
 # ---------- Install dependencies ----------
 info "Устанавливаем зависимости (curl, git, docker, docker compose)..."
 retry_operation apt-get update -y || err "apt-get update не удалось."
@@ -194,19 +171,18 @@ ok "Docker установлен."
 
 if ! docker compose version >/dev/null 2>&1; then
   info "Устанавливаем docker compose-plugin..."
-  # На новых Docker уже должен быть compose-plugin. Попробуем поставить через apt.
   retry_operation apt-get install -y docker-compose-plugin || warn "Не удалось поставить docker-compose-plugin из apt."
 fi
-docker compose version || err "docker compose недоступен."
+docker compose version >/dev/null 2>&1 || err "docker compose недоступен."
 
 # ---------- Prepare directories ----------
 info "Готовим структуру каталогов..."
 mkdir -p "/root/supabase"
-mkdir -p "${PROJECT_DIR}/"{configs/traefik/dynamic,configs/supabase,volumes/traefik,volumes/postgres,volumes/n8n,volumes/supabase/scripts,volumes/supabase/db,data,logs,scripts}
+mkdir -p "${PROJECT_DIR}/"{configs/traefik/dynamic,configs/supabase,volumes/traefik,volumes/postgres,volumes/n8n,volumes/supabase,volumes/db,volumes/logs,volumes/pooler,data,logs,scripts}
 touch "${PROJECT_DIR}/volumes/traefik/acme.json"
 chmod 600 "${PROJECT_DIR}/volumes/traefik/acme.json"
 
-# ---------- Clone Supabase (once) ----------
+# ---------- Clone Supabase (once/update) ----------
 if [ ! -d "/root/supabase/.git" ]; then
   info "Клонируем Supabase (self-hosted) репозиторий..."
   git clone --depth=1 https://github.com/supabase/supabase.git /root/supabase || err "Клонирование supabase не удалось."
@@ -222,49 +198,64 @@ N8N_ENCRYPTION_KEY="$(gen_alnum 32)"
 REDIS_PASSWORD="$(gen_alnum 24)"
 DASHBOARD_USERNAME="admin"
 DASHBOARD_PASSWORD="$(gen_alnum 24)"
-
 JWT_SECRET="$(gen_alnum 40)"
 
 now_epoch=$(date +%s)
 exp_epoch=$(( now_epoch + 20*365*24*3600 )) # ~20 лет
-
 ANON_PAYLOAD=$(printf '{"role":"anon","iss":"supabase","iat":%d,"exp":%d}' "$now_epoch" "$exp_epoch")
 SERVICE_PAYLOAD=$(printf '{"role":"service_role","iss":"supabase","iat":%d,"exp":%d}' "$now_epoch" "$exp_epoch")
 ANON_KEY="$(jwt_hs256 "$JWT_SECRET" "$ANON_PAYLOAD")"
 SERVICE_ROLE_KEY="$(jwt_hs256 "$JWT_SECRET" "$SERVICE_PAYLOAD")"
-
 ok "Секреты сгенерированы."
 
-# ---------- Build .env ----------
+# ---------- Build .env (STRICT KEY=VALUE) ----------
 info "Готовим .env..."
-cp /root/supabase/docker/.env.example "${PROJECT_DIR}/.env" || touch "${PROJECT_DIR}/.env"
+cp /root/supabase/docker/.env.example "${PROJECT_DIR}/.env" || true
 
-# Безопасная подстановка значений:
-sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" "${PROJECT_DIR}/.env" || true
-sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" "${PROJECT_DIR}/.env" || echo "JWT_SECRET=${JWT_SECRET}" >> "${PROJECT_DIR}/.env"
-sed -i "s/^ANON_KEY=.*/ANON_KEY=${ANON_KEY}/" "${PROJECT_DIR}/.env" || echo "ANON_KEY=${ANON_KEY}" >> "${PROJECT_DIR}/.env"
-sed -i "s/^SERVICE_ROLE_KEY=.*/SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}/" "${PROJECT_DIR}/.env" || echo "SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}" >> "${PROJECT_DIR}/.env"
-
-# Общие переменные:
+# Базовые безопасные значения (строго KEY=VALUE, без двоеточий):
 {
+  echo "INSTALLATION_MODE=${INSTALLATION_MODE}"
   echo "ROOT_DOMAIN=${ROOT_DOMAIN}"
   echo "N8N_HOST=${N8N_HOST}"
   echo "STUDIO_HOST=${STUDIO_HOST}"
   echo "API_HOST=${API_HOST}"
   echo "ACME_EMAIL=${ACME_EMAIL}"
+
+  echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+  echo "POSTGRES_DB=postgres"
+  echo "POSTGRES_HOST=db"
+  echo "POSTGRES_PORT=5432"
+  echo "PGRST_DB_SCHEMAS=public"
+
+  echo "JWT_SECRET=${JWT_SECRET}"
+  echo "ANON_KEY=${ANON_KEY}"
+  echo "SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}"
+  echo "JWT_EXPIRY=630720000"   # ~20 лет в секундах
+
   echo "DASHBOARD_USERNAME=${DASHBOARD_USERNAME}"
   echo "DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}"
-  echo "N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}"
-  echo "REDIS_PASSWORD=${REDIS_PASSWORD}"
-  echo "POSTGRES_DB=postgres"
-  echo "POSTGRES_PORT=5432"
-  echo "POSTGRES_HOST=db"
+
   echo "SUPABASE_PUBLIC_URL=https://${API_HOST}"
   echo "SITE_URL=https://${STUDIO_HOST}"
-  echo "INSTALLATION_MODE=${INSTALLATION_MODE}"
-} >> "${PROJECT_DIR}/.env"
-  echo "DOCKER_SOCKET_LOCATION=/var/run/docker.sock" >> "${PROJECT_DIR}/.env"
+  echo "API_EXTERNAL_URL=https://${API_HOST}"
 
+  echo "KONG_HTTP_PORT=8000"
+  echo "KONG_HTTPS_PORT=8443"
+
+  echo "IMGPROXY_ENABLE_WEBP_DETECTION=true"
+
+  echo "DOCKER_SOCKET_LOCATION=/var/run/docker.sock"
+
+  # Studio defaults (с кавычками из-за пробелов)
+  echo 'STUDIO_DEFAULT_ORGANIZATION="MEDIA WORKS"'
+  echo "STUDIO_DEFAULT_PROJECT=${PROJECT_NAME}"
+
+  # n8n DB
+  echo "N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}"
+  echo "REDIS_PASSWORD=${REDIS_PASSWORD}"
+} >> "${PROJECT_DIR}/.env"
+
+# SMTP блок
 if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
   {
     echo "SMTP_HOST=${SMTP_HOST}"
@@ -275,17 +266,28 @@ if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
     echo "SMTP_ADMIN_EMAIL=${SMTP_ADMIN_EMAIL}"
     echo "ENABLE_EMAIL_SIGNUP=true"
     echo "ENABLE_ANONYMOUS_USERS=false"
+    echo "ENABLE_EMAIL_AUTOCONFIRM=true"
+    echo "ENABLE_PHONE_SIGNUP=false"
+    echo "ENABLE_PHONE_AUTOCONFIRM=false"
   } >> "${PROJECT_DIR}/.env"
 else
   {
     echo "ENABLE_EMAIL_SIGNUP=false"
     echo "ENABLE_ANONYMOUS_USERS=true"
+    echo "ENABLE_EMAIL_AUTOCONFIRM=false"
+    echo "ENABLE_PHONE_SIGNUP=false"
+    echo "ENABLE_PHONE_AUTOCONFIRM=false"
   } >> "${PROJECT_DIR}/.env"
 fi
 
-# Очистка .env
+# Очистка .env и валидация
 sed -i 's/[[:space:]]*$//' "${PROJECT_DIR}/.env"
 sed -i 's/\r$//' "${PROJECT_DIR}/.env"
+# Удаляем любые строки YAML-формата "KEY: value" если внезапно появились
+sed -i '/^[A-Za-z0-9_]\+:\s\+.*/d' "${PROJECT_DIR}/.env"
+# Приводим "KEY = VALUE" к "KEY=VALUE"
+sed -i 's/^\([A-Z0-9_]\+\)[[:space:]]*=[[:space:]]*/\1=/' "${PROJECT_DIR}/.env"
+# Проверка формата
 grep -E '^[A-Z0-9_]+=' "${PROJECT_DIR}/.env" >/dev/null || err "Invalid .env format (нет KEY=VALUE)."
 
 # ---------- Traefik config ----------
@@ -351,16 +353,20 @@ EOF
 # ---------- Compose files ----------
 info "Готовим Docker Compose файлы..."
 
-# Базовый supabase compose (для full/standard): используем upstream файл отдельно
+# 1) Для full/standard: подтягиваем базовый compose + нужные volumes из репо
 if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ]; then
   cp /root/supabase/docker/docker-compose.yml "${PROJECT_DIR}/compose.supabase.yml"
-  # ВАЖНО: подтягиваем все файлы, на которые ссылается compose (vector.yml, sql-скрипты и т.п.)
-  mkdir -p "${PROJECT_DIR}/volumes"
-  cp -r /root/supabase/docker/volumes/* "${PROJECT_DIR}/volumes/"
+  # Обязательные каталоги/файлы для vector/db/pooler
+  mkdir -p "${PROJECT_DIR}/volumes/logs" "${PROJECT_DIR}/volumes/db" "${PROJECT_DIR}/volumes/pooler"
+  cp -rT /root/supabase/docker/volumes/logs   "${PROJECT_DIR}/volumes/logs"
+  cp -rT /root/supabase/docker/volumes/db     "${PROJECT_DIR}/volumes/db"
+  cp -rT /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/pooler"
 fi
 
-# override: Traefik + n8n + лейблы для проксирования supabase (kong/studio)
+# 2) Наш override: Traefik + n8n + Traefik labels для kong/studio
 cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
+version: "3.8"
+
 x-common: &common
   restart: unless-stopped
   logging:
@@ -380,7 +386,7 @@ services:
     container_name: traefik
     command:
       - "--providers.docker=true"
-      - "--providers.docker.network=PROJECT_WEB_NET"
+      - "--providers.docker.network=${PROJECT_WEB_NET}"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.ping.address=:8080"
@@ -466,7 +472,7 @@ services:
     networks:
       - internal
 
-  # Дополнить лейблы на уже существующие supabase сервисы (kong/studio), если они присутствуют (full/standard)
+  # Traefik-лейблы для supabase сервисов (подтягиваются из compose.supabase.yml)
   kong:
     labels:
       - "traefik.enable=true"
@@ -484,10 +490,11 @@ services:
       - "traefik.http.routers.studio.middlewares=mw-sec-headers@file,mw-ratelimit@file"
 EOF
 
-# Для LIGHT / RAG формируем отдельные supabase/pg compose
+# LIGHT compose
 if [ "$INSTALLATION_MODE" = "light" ]; then
-  info "Режим LIGHT — создаём compose для Postgres (для n8n)."
   cat > "${PROJECT_DIR}/compose.light.yml" <<'EOF'
+version: "3.8"
+networks: { internal: {} }
 services:
   postgres:
     image: postgres:15-alpine
@@ -503,15 +510,12 @@ services:
       retries: 10
     volumes:
       - ./volumes/postgres:/var/lib/postgresql/data
-    networks:
-      - internal
+    networks: [internal]
 
-  # init user/db for n8n
   pg-init:
     image: postgres:15-alpine
     container_name: pg-init
-    depends_on:
-      - postgres
+    depends_on: [postgres]
     entrypoint: ["/bin/sh","-c"]
     command:
       - |
@@ -528,32 +532,30 @@ services:
         SQL
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD}
-    networks:
-      - internal
-
-networks:
-  internal:
+    networks: [internal]
 EOF
 fi
 
+# RAG compose (урезанный supabase)
 if [ "$INSTALLATION_MODE" = "rag" ]; then
-  info "Режим RAG — создаём урезанный compose Supabase."
   cat > "${PROJECT_DIR}/compose.supabase.rag.yml" <<'EOF'
+version: '3.8'
 x-common: &common
   restart: unless-stopped
   logging:
     driver: "json-file"
     options: { max-size: "10m", max-file: "3" }
 
-networks:
-  web:
-  internal:
+networks: { web: {}, internal: {} }
 
 services:
   vector:
     <<: *common
     image: timberio/vector:0.28.1-alpine
     container_name: supabase-vector
+    volumes:
+      - ./volumes/logs/vector.yml:/etc/vector/vector.yml:ro,z
+      - ${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,z
     healthcheck:
       test: ["CMD","wget","--no-verbose","--tries=1","--spider","http://vector:9001/health"]
       interval: 5s
@@ -569,24 +571,45 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       JWT_SECRET: ${JWT_SECRET}
-      JWT_EXP: 630720000  # ~20 лет в секундах
+      JWT_EXP: ${JWT_EXPIRY}
       PGPORT: ${POSTGRES_PORT}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_HOST: /var/run/postgresql
     volumes:
-      - ./volumes/supabase/db/data:/var/lib/postgresql/data
+      - ./volumes/db/realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+      - ./volumes/db/webhooks.sql:/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql:Z
+      - ./volumes/db/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-roles.sql:Z
+      - ./volumes/db/jwt.sql:/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql:Z
+      - ./volumes/db/data:/var/lib/postgresql/data:Z
+      - ./volumes/db/_supabase.sql:/docker-entrypoint-initdb.d/migrations/97-_supabase.sql:Z
+      - ./volumes/db/logs.sql:/docker-entrypoint-initdb.d/migrations/99-logs.sql:Z
+      - ./volumes/db/pooler.sql:/docker-entrypoint-initdb.d/migrations/99-pooler.sql:Z
+      - db-config:/etc/postgresql-custom
     healthcheck:
       test: ["CMD","pg_isready","-U","postgres","-h","localhost"]
       interval: 5s
       timeout: 5s
       retries: 10
-    depends_on: [vector]
+    depends_on:
+      vector:
+        condition: service_healthy
     networks: [internal]
 
   supavisor:
     <<: *common
     image: supabase/supavisor:2.5.7
     container_name: supabase-pooler
+    ports:
+      - ${POSTGRES_PORT}:5432
+    volumes:
+      - ./volumes/pooler/pooler.exs:/etc/pooler/pooler.exs:ro,z
+    healthcheck:
+      test: ["CMD","curl","-sSfL","--head","-o","/dev/null","http://127.0.0.1:4000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      db: { condition: service_healthy }
     environment:
       PORT: 4000
       POSTGRES_PORT: ${POSTGRES_PORT}
@@ -605,9 +628,6 @@ services:
       POOLER_MAX_CLIENT_CONN: 50
       POOLER_POOL_MODE: transaction
       DB_POOL_SIZE: 10
-    depends_on:
-      db:
-        condition: service_healthy
     networks: [internal]
 
   meta:
@@ -622,8 +642,7 @@ services:
       PG_META_DB_USER: supabase_admin
       PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:
-      db:
-        condition: service_healthy
+      db: { condition: service_healthy }
     networks: [internal]
 
   rest:
@@ -637,11 +656,10 @@ services:
       PGRST_JWT_SECRET: ${JWT_SECRET}
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET}
-      PGRST_APP_SETTINGS_JWT_EXP: 630720000
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXPIRY}
     command: ["postgrest"]
     depends_on:
-      db:
-        condition: service_healthy
+      db: { condition: service_healthy }
     networks: [internal]
 
   auth:
@@ -658,7 +676,7 @@ services:
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
-      GOTRUE_JWT_EXP: 630720000
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
       GOTRUE_JWT_SECRET: ${JWT_SECRET}
       GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
       GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: ${ENABLE_ANONYMOUS_USERS}
@@ -674,8 +692,7 @@ services:
       timeout: 5s
       retries: 3
     depends_on:
-      db:
-        condition: service_healthy
+      db: { condition: service_healthy }
     networks: [internal]
 
   kong:
@@ -686,7 +703,7 @@ services:
       - "8000:8000"
       - "8443:8443"
     volumes:
-      - ./configs/supabase/kong.yml:/home/kong/temp.yml:ro
+      - ./configs/supabase/kong.yml:/home/kong/temp.yml:ro,z
     environment:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
@@ -698,10 +715,8 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     entrypoint: bash -c 'eval "echo \"$$(cat ~/temp.yml)\"" > ~/kong.yml && /docker-entrypoint.sh kong docker-start'
     depends_on:
-      auth:
-        condition: service_started
-      rest:
-        condition: service_started
+      auth: { condition: service_started }
+      rest: { condition: service_started }
     networks: [internal, web]
 
   studio:
@@ -711,8 +726,8 @@ services:
     environment:
       STUDIO_PG_META_URL: http://meta:8080
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      DEFAULT_ORGANIZATION_NAME: MEDIA WORKS
-      DEFAULT_PROJECT_NAME: ${PROJECT_NAME}
+      DEFAULT_ORGANIZATION_NAME: ${STUDIO_DEFAULT_ORGANIZATION}
+      DEFAULT_PROJECT_NAME: ${STUDIO_DEFAULT_PROJECT}
       SUPABASE_URL: http://kong:8000
       SUPABASE_PUBLIC_URL: https://${API_HOST}
       SUPABASE_ANON_KEY: ${ANON_KEY}
@@ -724,13 +739,15 @@ services:
       interval: 5s
       retries: 3
     depends_on:
-      meta:
-        condition: service_started
+      meta: { condition: service_started }
     networks: [internal, web]
+
+volumes:
+  db-config:
 EOF
 fi
 
-# ---------- Supabase Kong template (simple) ----------
+# ---------- Supabase Kong template ----------
 cat > "${PROJECT_DIR}/configs/supabase/kong.yml" <<'EOF'
 _format_version: "2.1"
 _transform: true
@@ -740,19 +757,17 @@ services:
     url: http://rest:3000
     routes:
       - name: rest
-        paths:
-          - /rest/v1/
+        paths: ["/rest/v1/"]
         strip_path: false
-        protocols: [http, https]
+        protocols: ["http","https"]
 
   - name: auth
     url: http://auth:9999
     routes:
       - name: auth
-        paths:
-          - /auth/v1/
+        paths: ["/auth/v1/"]
         strip_path: false
-        protocols: [http, https]
+        protocols: ["http","https"]
 
 plugins:
   - name: cors
@@ -765,7 +780,7 @@ plugins:
       preflight_continue: false
 EOF
 
-# ---------- Compose env for n8n DB host ----------
+# ---------- n8n DB host / password ----------
 if [ "$INSTALLATION_MODE" = "light" ]; then
   N8N_DB_HOST="postgres"
 else
@@ -777,9 +792,6 @@ N8N_DB_PASSWORD="$(gen_alnum 24)"
   echo "N8N_DB_PASSWORD=${N8N_DB_PASSWORD}"
 } >> "${PROJECT_DIR}/.env"
 
-# ---------- Replace network name placeholder in override (we need deterministic net name) ----------
-# Compose builds network names as: <folder>_web by default; set placeholder and replace later in manage.sh.
-
 # ---------- Scripts: manage / backup / update ----------
 info "Создаём служебные скрипты..."
 
@@ -788,12 +800,19 @@ cat > "${PROJECT_DIR}/scripts/manage.sh" <<'EOF'
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Вычисляем имя сети Traefik (используется в traefik command)
+# Безопасная загрузка только строк KEY=VALUE
+set -a
+while IFS= read -r line; do
+  case "$line" in
+    ''|\#*) continue ;;
+    *=*) export "$line" ;;
+  esac
+done < .env
+set +a
+
 PROJECT_BASENAME="$(basename "$PWD")"
 PROJECT_WEB_NET="${PROJECT_BASENAME}_web"
 export PROJECT_WEB_NET
-
-source .env
 
 MODE="${INSTALLATION_MODE:-standard}"
 
@@ -813,25 +832,12 @@ case "$MODE" in
 esac
 
 case "${1:-up}" in
-  up)
-    docker compose "${compose_args[@]}" up -d
-    ;;
-  down)
-    docker compose "${compose_args[@]}" down
-    ;;
-  ps)
-    docker compose "${compose_args[@]}" ps
-    ;;
-  logs)
-    shift || true
-    docker compose "${compose_args[@]}" logs -f "${@:-}"
-    ;;
-  restart)
-    docker compose "${compose_args[@]}" restart
-    ;;
-  pull)
-    docker compose "${compose_args[@]}" pull
-    ;;
+  up)       docker compose "${compose_args[@]}" up -d ;;
+  down)     docker compose "${compose_args[@]}" down ;;
+  ps)       docker compose "${compose_args[@]}" ps ;;
+  logs)     shift || true; docker compose "${compose_args[@]}" logs -f "${@:-}" ;;
+  restart)  docker compose "${compose_args[@]}" restart ;;
+  pull)     docker compose "${compose_args[@]}" pull ;;
   *)
     echo "Usage: $0 {up|down|ps|logs|restart|pull}" ;;
 esac
@@ -842,7 +848,12 @@ cat > "${PROJECT_DIR}/scripts/backup.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source .env
+
+set -a
+while IFS= read -r line; do
+  case "$line" in ''|\#*) continue ;; *=*) export "$line" ;; esac
+done < .env
+set +a
 
 TS=$(date +%Y%m%d_%H%M%S)
 mkdir -p backups
@@ -920,19 +931,17 @@ chmod 600 "${PROJECT_DIR}/credentials.txt"
 
 # ---------- Start stack ----------
 info "Запускаем стек по зависимостям..."
-
 pushd "${PROJECT_DIR}" >/dev/null
 
-# 1) Старт БД
 if [ "$INSTALLATION_MODE" = "light" ]; then
   ./scripts/manage.sh up
   wait_for_postgres postgres || err "PostgreSQL (light) не поднялся."
-  # Создать пользователя/базу для n8n — это делает pg-init в compose
 else
-  # full/standard: сначала только базу supabase-db из compose.supabase.yml
+  # Сначала база (требует здоровый vector в full/standard из upstream)
+  docker compose -f compose.supabase.yml up -d vector || true
   docker compose -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
   wait_for_postgres supabase-db || err "Supabase DB не поднялся."
-  # затем весь стек
+  # Затем весь стек
   ./scripts/manage.sh up
 fi
 
@@ -959,6 +968,6 @@ echo
 echo "Важно:"
 echo " - Проверьте DNS записи для доменов:"
 echo "     ${N8N_HOST}, ${STUDIO_HOST}, ${API_HOST}"
-echo " - Откройте порты 80/443 на сервере/фаерволе."
+echo " - Откройте порты 80/443."
 echo " - Первичная авторизация в Supabase Studio: ${DASHBOARD_USERNAME} / ${DASHBOARD_PASSWORD}"
 echo " - n8n доступен по: https://${N8N_HOST}"
