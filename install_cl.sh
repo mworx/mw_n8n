@@ -672,4 +672,12 @@ show_summary() {
     log_success "Установка завершена!"
     echo ""
     echo "Проект создан в: $PROJECT_DIR"
-    echo "Дл
+    echo "Для просмотра паролей: cat $PROJECT_DIR/credentials.txt"
+}
+
+# ==============================================================================
+# RUN MAIN FUNCTION - THIS IS CRITICAL!
+# ==============================================================================
+
+# This line actually starts the installation process
+main "$@"
