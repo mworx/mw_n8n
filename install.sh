@@ -1,27 +1,43 @@
 #!/bin/bash
+# Строка выше должна быть самой первой в файле
 
-# ============================================================================
-# БЛОК ПЕРЕЗАПУСКА ДЛЯ `curl | bash`
-# Этот блок должен быть в самом начале.
-# ============================================================================
-# Если стандартный ввод НЕ является терминалом, значит, скрипт запущен через pipe.
-if ! [ -t 0 ]; then
-  # В этом случае мы перезапускаем скрипт, скачивая его еще раз,
-  # но уже внутри нового интерактивного сеанса 'bash -c'.
-  # Это гарантирует, что у нового процесса будет терминал для интерактивного ввода.
-  # Замените URL, если он изменится.
-  exec bash -c "$(curl -fsSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install.sh)"
+if [ -t 0 ]; then
+  # Если скрипт уже запущен в интерактивном терминале, просто выполняем main
+  set -euo pipefail
+  # ... (здесь начинается остальная часть вашего скрипта, с констант и функций)
+  main "$@"
+else
+  # Если скрипт запущен через pipe (curl | bash),
+  # скачиваем его и запускаем в новом интерактивном сеансе bash.
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install.sh)"
 fi
 
+# ВАЖНО: Весь остальной код скрипта должен быть ниже,
+# внутри блока "if [ -t 0 ]" или в функциях, которые он вызывает.
+# Чтобы не переделывать структуру, мы просто обернем вызов main().
+
+exit 0 # Завершаем выполнение оригинального (неинтерактивного) скрипта
+
 # ============================================================================
-# ОСНОВНОЙ СКРИПТ
-# С этого момента мы гарантированно работаем в интерактивном терминале.
-# Теперь можно безопасно включить строгий режим.
+# ДАЛЕЕ ИДЕТ ВЕСЬ ВАШ СКРИПТ, НАЧИНАЯ С КОНСТАНТ
 # ============================================================================
-set -euo pipefail
+
+# ... (readonly SCRIPT_VERSION, функции и т.д.) ...
+
+main() {
+  # ... (вся логика основной функции) ...
+}
+
+# ============================================================================
+# MEDIA WORKS - Автоматизированная установка Supabase + N8N + Traefik
+# Версия: 4.1.1 (Исправленная)
+# Автор: MEDIA WORKS DevOps Team
+# Описание: Production-ready установщик с 4 режимами и генерацией
+#           корректных Docker Compose конфигураций.
+# ============================================================================
 
 # ============================ КОНСТАНТЫ =====================================
-readonly SCRIPT_VERSION="5.0"
+readonly SCRIPT_VERSION="4.1.1"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 readonly LOG_FILE="/tmp/mediaworks_install_${TIMESTAMP}.log"
@@ -61,6 +77,7 @@ show_spinner() {
 }
 
 show_media_works_logo() {
+    # ИСПРАВЛЕНИЕ: `clear || true` не прервет выполнение скрипта, если `clear` недоступен
     clear || true
     cat << 'EOF'
     ███╗   ███╗███████╗██████╗ ██╗ █████╗     ██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗███████╗
@@ -155,6 +172,13 @@ select_installation_mode() {
 
 get_project_config() {
     info "Сбор конфигурации проекта..."
+
+    # ИСПРАВЛЕНИЕ: Инициализируем переменные пустыми строками,
+    # чтобы 'set -u' не прерывал скрипт при нажатии Enter.
+    local p_name=""
+    local d_name=""
+    local e_name=""
+
     read -p "$(echo -e "${ARROW} Название проекта ${GRAY}[$DEFAULT_PROJECT_NAME]${NC}: ")" p_name
     PROJECT_NAME=${p_name:-$DEFAULT_PROJECT_NAME}
 
@@ -164,15 +188,12 @@ get_project_config() {
     if [[ "$DOMAIN" != "localhost" ]]; then
         read -p "$(echo -e "${ARROW} Email для SSL сертификата ${GRAY}[$DEFAULT_EMAIL]${NC}: ")" e_name
         EMAIL=${e_name:-$DEFAULT_EMAIL}
-        USE_SSL="true"
     else
         EMAIL=$DEFAULT_EMAIL
-        USE_SSL="false"
         info "SSL будет отключен для домена localhost."
     fi
     success "Конфигурация проекта сохранена."
 }
-
 # ============================ ГЕНЕРАЦИЯ ДАННЫХ ============================
 
 generate_password() { tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c "${1:-32}"; }
@@ -207,6 +228,8 @@ N8N_BASIC_AUTH_PASSWORD=$(generate_password 24)
 REDIS_PASSWORD=$(generate_password 32)
 SECRET_KEY_BASE=$(generate_password 64)
 VAULT_ENC_KEY=$(generate_password 64)
+LOGFLARE_PUBLIC_ACCESS_TOKEN=sb_$(generate_password 32)
+LOGFLARE_PRIVATE_ACCESS_TOKEN=lf_$(generate_password 32)
 N8N_ENCRYPTION_KEY=$(generate_password 32)
 EOF
 }
@@ -215,7 +238,7 @@ EOF
 
 create_project_structure() {
     info "Создание структуры проекта в $1..."
-    mkdir -p "$1"/{configs/{traefik/dynamic,supabase},volumes/{db/migrations,n8n,redis,storage,functions,traefik},scripts,backups}
+    mkdir -p "$1"/{configs/{traefik/dynamic,supabase},volumes/{db/migrations,db/init-scripts,n8n,redis,storage,functions,traefik},scripts,backups}
     touch "$1"/volumes/traefik/acme.json && chmod 600 "$1"/volumes/traefik/acme.json
     success "Структура проекта создана."
 }
@@ -235,24 +258,33 @@ prepare_supabase_files() {
     local project_dir=$1
     local supabase_docker_dir="/root/supabase/docker"
     info "Копирование файлов инициализации Supabase..."
+    set -e # Включим строгий режим на время копирования
     cp "$supabase_docker_dir"/volumes/db/*.sql "$project_dir/volumes/db/migrations/"
+    # Создаем пустые файлы, если их нет, чтобы избежать ошибок в docker-compose
+    touch "$project_dir/volumes/db/init-scripts/98-webhooks.sql"
+    touch "$project_dir/volumes/db/init-scripts/99-roles.sql"
+    
     mkdir -p "$project_dir/configs/supabase"
     cp "$supabase_docker_dir"/kong.yml "$project_dir/configs/supabase/kong.yml"
+    cp "$supabase_docker_dir"/volumes/logs/vector.yml "$project_dir/configs/vector.yml"
+    cp "$supabase_docker_dir"/volumes/pooler/pooler.exs "$project_dir/configs/pooler.exs"
+    set +e
     success "Файлы инициализации Supabase скопированы."
 }
 
 create_env_file() {
-    local project_dir=$1
+    local project_dir=$1 mode=$2 domain=$3 email=$4 use_ssl=$5
     info "Создание конфигурационного файла .env..."
-    eval "$2" # Загружаем сгенерированные учетные данные в переменные
+    # Загружаем сгенерированные учетные данные в переменные
+    eval "$6"
 
     cat > "$project_dir/.env" << EOF
 # Основная конфигурация
 PROJECT_NAME=$(basename "$project_dir")
-DOMAIN=$DOMAIN
-SITE_URL=https://$DOMAIN
-API_EXTERNAL_URL=https://api.$DOMAIN
-SUPABASE_PUBLIC_URL=https://$DOMAIN
+DOMAIN=$domain
+SITE_URL=https://$domain
+API_EXTERNAL_URL=https://api.$domain
+SUPABASE_PUBLIC_URL=https://$domain
 
 # Учетные данные
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
@@ -269,7 +301,7 @@ SECRET_KEY_BASE=$SECRET_KEY_BASE
 VAULT_ENC_KEY=$VAULT_ENC_KEY
 
 # N8N
-N8N_HOST=n8n.$DOMAIN
+N8N_HOST=n8n.$domain
 N8N_BASIC_AUTH_ACTIVE=true
 N8N_BASIC_AUTH_USER=$N8N_BASIC_AUTH_USER
 N8N_BASIC_AUTH_PASSWORD=$N8N_BASIC_AUTH_PASSWORD
@@ -277,7 +309,8 @@ N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
 WEBHOOK_URL=https://$domain/
 
 # Traefik & SSL
-EMAIL=$EMAIL
+EMAIL=$email
+USE_SSL=$use_ssl
 
 # Компоненты
 POSTGRES_HOST=db
@@ -285,11 +318,30 @@ POSTGRES_PORT=5432
 POSTGRES_DB=postgres
 PGRST_DB_SCHEMAS=public,storage,graphql_public
 FUNCTIONS_VERIFY_JWT=true
+POOLER_PROXY_PORT_TRANSACTION=6543
 EOF
     sed -i 's/[[:space:]]*$//; s/\r$//' "$project_dir/.env"
     success "Файл .env создан."
 }
 
+
+create_traefik_configuration() {
+    local project_dir=$1
+    info "Настройка Traefik..."
+    # Основной конфиг traefik.yml не нужен, все настраивается через CLI arguments в docker-compose
+    # Middleware для безопасности
+    cat > "$project_dir/configs/traefik/dynamic/middlewares.yml" << EOF
+http:
+  middlewares:
+    secure-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+EOF
+    success "Конфигурация Traefik создана."
+}
 
 # ======================= Генерация Docker Compose ========================
 
@@ -343,10 +395,13 @@ generate_service_traefik() {
       - "--certificatesresolvers.letsencrypt.acme.email=\${EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
     ports: ["80:80", "443:443", "8080:8080"]
     volumes:
       - acme-data:/letsencrypt
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./configs/traefik/dynamic:/etc/traefik/dynamic:ro
     networks: { traefik_public: {} }
     labels:
       - "traefik.enable=true"
@@ -359,8 +414,8 @@ EOF
 }
 
 generate_service_db() {
-  local container_name=${1:-db}
-  cat >> "$2" <<EOF
+  local container_name=${2:-db}
+  cat >> "$1" <<EOF
   $container_name:
     <<: *common
     image: supabase/postgres:15.8.1.060
@@ -391,7 +446,49 @@ generate_service_n8n_single() {
     environment:
       - N8N_HOST=\${N8N_HOST}
       - WEBHOOK_URL=\${WEBHOOK_URL}
-      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_ACTIVE=\${N8N_BASIC_AUTH_ACTIVE}
+      - N8N_BASIC_AUTH_USER=\${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=\${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=\${N8N_ENCRYPTION_KEY}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=db
+      - DB_POSTGRESDB_DATABASE=\${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=postgres
+      - DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(\`\${N8N_HOST}\`)"
+      - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      - "traefik.docker.network=traefik_public"
+    networks: [ "internal_net", "traefik_public" ]
+EOF
+}
+
+generate_service_n8n_cluster() {
+  cat >> "$1" <<EOF
+  redis:
+    <<: *common
+    image: redis:6.2-alpine
+    container_name: \${PROJECT_NAME}_redis
+    command: redis-server --save 60 1 --loglevel warning --requirepass \${REDIS_PASSWORD}
+    volumes: [ "redis-data:/data" ]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "\${REDIS_PASSWORD}", "ping"]
+      interval: 10s; timeout: 5s; retries: 5
+
+  n8n-main:
+    <<: *common
+    image: n8nio/n8n:latest
+    container_name: \${PROJECT_NAME}_n8n_main
+    depends_on: { db: { condition: service_healthy }, redis: { condition: service_healthy } }
+    volumes: [ "n8n-data:/home/node/.n8n" ]
+    environment:
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}
+      - N8N_HOST=\${N8N_HOST}
       - N8N_BASIC_AUTH_USER=\${N8N_BASIC_AUTH_USER}
       - N8N_BASIC_AUTH_PASSWORD=\${N8N_BASIC_AUTH_PASSWORD}
       - N8N_ENCRYPTION_KEY=\${N8N_ENCRYPTION_KEY}
@@ -406,6 +503,24 @@ generate_service_n8n_single() {
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
       - "traefik.docker.network=traefik_public"
     networks: [ "internal_net", "traefik_public" ]
+
+  n8n-worker:
+    <<: *common
+    image: n8nio/n8n:latest
+    container_name: \${PROJECT_NAME}_n8n_worker
+    command: worker
+    depends_on: { db: { condition: service_healthy }, redis: { condition: service_healthy } }
+    volumes: [ "n8n-data:/home/node/.n8n" ]
+    environment:
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_BULL_REDIS_PASSWORD=\${REDIS_PASSWORD}
+      - N8N_ENCRYPTION_KEY=\${N8N_ENCRYPTION_KEY}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=db
+      - DB_POSTGRESDB_USER=postgres
+      - DB_POSTGRESDB_PASSWORD=\${POSTGRES_PASSWORD}
 EOF
 }
 
@@ -541,7 +656,23 @@ generate_service_storage() {
 EOF
 }
 
-generate_docker_compose_file() {
+generate_service_functions() {
+  cat >> "$1" <<EOF
+  functions:
+    <<: *common
+    image: supabase/edge-runtime:v1.67.4
+    container_name: \${PROJECT_NAME}_functions
+    depends_on: { db: { condition: service_healthy } }
+    volumes: [ "functions-data:/home/deno/functions" ]
+    environment:
+      - JWT_SECRET=\${JWT_SECRET}
+      - SUPABASE_DB_URL=postgresql://postgres:\${POSTGRES_PASSWORD}@db:\${POSTGRES_PORT}/\${POSTGRES_DB}
+      - VERIFY_JWT=\${FUNCTIONS_VERIFY_JWT}
+EOF
+}
+
+
+create_docker_compose_file() {
     local project_dir=$1 mode=$2
     local compose_file="$project_dir/docker-compose.yml"
     info "Генерация docker-compose.yml для режима '$mode'..."
@@ -550,28 +681,37 @@ generate_docker_compose_file() {
     generate_service_traefik "$compose_file"
 
     case "$mode" in
-        "$MODE_FULL"|"$MODE_STANDARD")
-            generate_service_db "db" "$compose_file"
+        "$MODE_FULL")
+            generate_service_db "$compose_file"
+            generate_service_n8n_cluster "$compose_file"
+            generate_service_kong "$compose_file"; generate_service_auth "$compose_file"; generate_service_rest "$compose_file"
+            generate_service_meta "$compose_file"; generate_service_storage "$compose_file"; generate_service_functions "$compose_file"
+            generate_service_studio "$compose_file"
+            ;;
+        "$MODE_STANDARD")
+            generate_service_db "$compose_file"
             generate_service_n8n_single "$compose_file"
             generate_service_kong "$compose_file"; generate_service_auth "$compose_file"; generate_service_rest "$compose_file"
-            generate_service_meta "$compose_file"; generate_service_storage "$compose_file"
+            generate_service_meta "$compose_file"; generate_service_storage "$compose_file"; generate_service_functions "$compose_file"
             generate_service_studio "$compose_file"
             ;;
         "$MODE_RAG")
-            generate_service_db "db" "$compose_file"
+            generate_service_db "$compose_file"
             generate_service_n8n_single "$compose_file"
             generate_service_kong "$compose_file"; generate_service_auth "$compose_file"; generate_service_rest "$compose_file"
-            generate_service_meta "$compose_file";
+            generate_service_meta "$compose_file" # Исключаем storage, functions, realtime
             generate_service_studio "$compose_file"
             ;;
         "$MODE_LIGHTWEIGHT")
-            generate_service_db "postgres" "$compose_file"
+            generate_service_db "$compose_file" "postgres"
             generate_service_n8n_single "$compose_file"
+            # Корректируем зависимость n8n на postgres
             sed -i 's/depends_on:\s*db:/depends_on:\n      postgres:/' "$compose_file"
             sed -i 's/DB_POSTGRESDB_HOST=db/DB_POSTGRESDB_HOST=postgres/' "$compose_file"
             ;;
     esac
     
+    # Хешируем пароль для Traefik Basic Auth и вставляем его в docker-compose
     source "$project_dir/.env"
     DASHBOARD_HASH=$(htpasswd -nbB admin "$DASHBOARD_PASSWORD" | cut -d ':' -f 2 | sed -e 's/\$/\$\$/g')
     sed -i "s|DASHBOARD_HASH|$DASHBOARD_HASH|" "$compose_file"
@@ -585,10 +725,12 @@ start_services() {
     local project_dir=$1
     info "Запуск всех сервисов... Это может занять несколько минут."
     cd "$project_dir"
+    # Создаем внешнюю сеть для Traefik перед запуском
     docker network create traefik_public 2>/dev/null || true
     
     { docker compose up -d --remove-orphans 2>&1 | tee -a "${LOG_FILE}"; } &
     show_spinner $! "Загрузка образов и запуск контейнеров"
+    # Проверяем код возврата `docker compose up`
     local status=${PIPESTATUS[0]}
     if [[ $status -ne 0 ]]; then
         error "Ошибка при запуске сервисов (код: $status). Проверьте 'docker compose -f $project_dir/docker-compose.yml logs'."
@@ -600,7 +742,7 @@ health_check() {
     local project_dir=$1
     info "Проверка работоспособности сервисов (может занять до минуты)..."
     cd "$project_dir"
-    sleep 20 
+    sleep 20 # Даем время на инициализацию
 
     local all_ok=true
     local services=$(docker compose ps --services)
@@ -671,6 +813,10 @@ URL: https://traefik.$domain
 
 [ API Endpoints ]
 Gateway/REST: https://api.$domain/rest/v1/
+
+[ Команды управления ]
+cd $project_dir
+./scripts/manage.sh {start|stop|restart|logs|update}
 =====================================================================
 EOF
     chmod 600 "$project_dir/credentials.txt"
@@ -711,7 +857,8 @@ main() {
     fi
 
     local credentials=$(generate_credentials)
-    create_env_file "$project_dir" "$credentials"
+    create_env_file "$project_dir" "$INSTALLATION_MODE" "$DOMAIN" "$EMAIL" "$USE_SSL" "$credentials"
+    create_traefik_configuration "$project_dir"
     create_docker_compose_file "$project_dir" "$INSTALLATION_MODE"
 
     start_services "$project_dir"
@@ -722,8 +869,5 @@ main() {
     display_final_summary "$project_dir" "$DOMAIN" "$INSTALLATION_MODE"
 }
 
-# ============================================================================
-# ВЫЗОВ ГЛАВНОЙ ФУНКЦИИ
-# Эта строка должна быть последней в скрипте.
-# ============================================================================
+# ============================ ЗАПУСК СКРИПТА ================================
 main "$@"
