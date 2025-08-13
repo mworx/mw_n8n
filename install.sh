@@ -51,7 +51,7 @@ retry_operation() {
   local max_attempts=3 delay=5 attempt=1
   while [ $attempt -le $max_attempts ]; do
     if "$@"; then return 0; fi
-    warn "Попытка $attempt из $max_attempts не удалась. Повтор через ${delay}s..."
+    warn "Попытка $attempt из $max_attemptов не удалась. Повтор через ${delay}s..."
     sleep "$delay"; attempt=$((attempt+1))
   done
   return 1
@@ -106,7 +106,6 @@ health_check_all_services() {
     wait_healthy supabase-db   || failed+=("Supabase DB")
     wait_healthy supabase-rest || failed+=("Supabase REST")
     wait_healthy supabase-auth || failed+=("Supabase Auth")
-    # Kong — нет health, просто проверим, что слушает
     if ! docker exec supabase-kong sh -c 'wget --spider -q http://localhost:8000/ || wget --spider -q http://localhost:8000/status' >/dev/null 2>&1; then
       failed+=("Supabase Kong")
     fi
@@ -125,7 +124,7 @@ read -rp " * Имя проекта (каталог в /root): " RAW_PROJECT_NAME
 [ -n "${RAW_PROJECT_NAME:-}" ] || err "Имя проекта обязательно."
 RAW_PROJECT_NAME="$(printf '%s' "$RAW_PROJECT_NAME" | tr -d '\r')"
 
-# Нормализация имени проекта: только [a-z0-9-], в нижний регистр, обрезка по краям, ≥1 символ
+# Нормализация имени проекта: [a-z0-9-], lower, сжатие дефисов, срез краёв
 NORMALIZED="$(printf '%s' "$RAW_PROJECT_NAME" \
   | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null \
   | tr '[:upper:]' '[:lower:]' \
@@ -255,9 +254,8 @@ MAILER_URLPATHS_INVITE="/auth/v1/verify"
 MAILER_URLPATHS_RECOVERY="/auth/v1/verify"
 MAILER_URLPATHS_EMAIL_CHANGE="/auth/v1/verify"
 
-# SMTP дефолты (порт числом — иначе Gotrue падает)
 : "${SMTP_HOST:=}"
-: "${SMTP_PORT:=587}"
+: "${SMTP_PORT:=587}"   # число — иначе gotrue падает
 : "${SMTP_USER:=}"
 : "${SMTP_PASS:=}"
 : "${SMTP_SENDER_NAME:=}"
@@ -301,7 +299,7 @@ KONG_HTTP_PORT=8000
 KONG_HTTPS_PORT=8443
 IMGPROXY_ENABLE_WEBP_DETECTION=true
 
-# Vector / Docker socket (важно!)
+# Docker socket (важно!)
 DOCKER_SOCKET_LOCATION=/var/run/docker.sock
 
 # Studio defaults
@@ -344,7 +342,7 @@ MAILER_URLPATHS_INVITE=${MAILER_URLPATHS_INVITE}
 MAILER_URLPATHS_RECOVERY=${MAILER_URLPATHS_RECOVERY}
 MAILER_URLPATHS_EMAIL_CHANGE=${MAILER_URLPATHS_EMAIL_CHANGE}
 
-# SMTP (даже если не используем — порт должен быть числом)
+# SMTP
 SMTP_HOST=${SMTP_HOST}
 SMTP_PORT=${SMTP_PORT}
 SMTP_USER=${SMTP_USER}
@@ -370,9 +368,9 @@ sed -i '/^[A-Za-z0-9_]\+:\s\+.*/d' "${PROJECT_DIR}/.env"
 sed -i 's/^\([A-Z0-9_]\+\)[[:space:]]*=[[:space:]]*/\1=/' "${PROJECT_DIR}/.env"
 grep -E '^[A-Z0-9_]+=' "${PROJECT_DIR}/.env" >/dev/null || err "Invalid .env format (нет KEY=VALUE)."
 
-# ---------- Traefik (максимально просто) ----------
+# ---------- Traefik (максимально просто; email подставляется!) ----------
 info "Создаём конфигурацию Traefik..."
-cat > "${PROJECT_DIR}/configs/traefik/traefik.yml" <<'EOF'
+cat > "${PROJECT_DIR}/configs/traefik/traefik.yml" <<EOF
 entryPoints:
   web:
     address: ":80"
@@ -412,7 +410,7 @@ if [ "$INSTALLATION_MODE" != "light" ]; then
   cp -a /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/"
   cp -a /root/supabase/docker/volumes/api    "${PROJECT_DIR}/volumes/"
 
-  # db не ждёт vector:healthy (только started) — меньше флапов
+  # db не ждёт vector:healthy (только started)
   sed -i '0,/\bdb:\b/{:a;N;/depends_on:/!ba;s/vector:\s*\n\s*condition:\s*service_healthy/vector:\n        condition: service_started/}' "${PROJECT_DIR}/compose.supabase.yml"
   # vector монтирует папку, а не файл
   sed -i 's#- \./volumes/logs/vector\.yml:/etc/vector/vector\.yml:ro,z#- ./volumes/logs:/etc/vector:ro,z#' "${PROJECT_DIR}/compose.supabase.yml"
@@ -581,7 +579,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < .env
 set +a
 
-# Имя сети Traefik
+# Имя сети Traefik (единый проект для объединения сетей двух compose)
 if grep -qE '^[[:space:]]*name:[[:space:]]*supabase\b' compose.supabase.yml 2>/dev/null; then
   PROJECT_NAME="supabase"
 else
@@ -716,10 +714,11 @@ if [ "$INSTALLATION_MODE" = "light" ]; then
   ./scripts/manage.sh up
   wait_for_postgres postgres-n8n || err "PostgreSQL (n8n) не поднялся."
 else
-  # Сначала supabase core (vector + db) с явным --env-file
+  # Сначала Supabase core (vector + db)
   docker compose --env-file .env -f compose.supabase.yml up -d vector || true
   docker compose --env-file .env -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
   wait_for_postgres supabase-db || err "Supabase DB не поднялся."
+  # Затем весь остальной стек
   ./scripts/manage.sh up
   wait_for_postgres postgres-n8n || err "PostgreSQL (n8n) не поднялся."
 fi
