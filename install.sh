@@ -280,6 +280,7 @@ API_EXTERNAL_URL=https://${API_HOST}
 KONG_HTTP_PORT=8000
 KONG_HTTPS_PORT=8443
 IMGPROXY_ENABLE_WEBP_DETECTION=true
+DOCKER_SOCKET_LOCATION=/var/run/docker.sock
 
 # Studio defaults (брендинг)
 STUDIO_DEFAULT_ORGANIZATION=MEDIA WORKS
@@ -706,6 +707,11 @@ ok "Скрипты готовы."
 
 # ---------- Credentials ----------
 info "Записываем credentials..."
+# Загружаем .env в окружение, чтобы не ловить 'unbound variable' при set -u
+set -a
+. "${PROJECT_DIR}/.env"
+set +a
+
 cat > "${PROJECT_DIR}/credentials.txt" <<EOF
 ==== MEDIA WORKS — Credentials (${PROJECT_NAME}) ====
 
