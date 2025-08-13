@@ -1,99 +1,19 @@
 #!/bin/bash
 #
 # =================================================================
-# |
-
-| MEDIA WORKS - Universal Stack Installer ||
+# # | | MEDIA WORKS - Universal Stack Installer ||
 # =================================================================
-# |
-
-| ||
-# |
-
-| Автоматизированный установщик для стека Supabase и n8n ||
-# |
-
-| Версия: 1.0.0 ||
-# |
-
-| Разработчик: Senior DevOps Engineer ||
-# |
-
-| ||
+# # | |
+# # | | Автоматизированный установщик для стека Supabase и n8n ||
+# # | | Версия: 1.0.0 ||
+# # | | Разработчик: Senior DevOps Engineer ||
+# # | |
 # =================================================================
 
 set -e # Прерывать выполнение скрипта при любой ошибке
 
 # --- Цветовые коды для вывода ---
-C_RESET='\033${C_RESET} $1"
-}
-
-success() {
-    echo -e "${C_GREEN}${C_RESET} $1"
-}
-
-warn() {
-    echo -e "${C_YELLOW}${C_RESET} $1"
-}
-
-error() {
-    echo -e "${C_RED}${C_RESET} $1" >&2
-    exit 1
-}
-
-# --- Функция для генерации случайных паролей ---
-generate_password() {
-    tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32
-}
-
-# --- Функция для генерации JWT токенов Supabase (реализация на Bash) ---
-generate_jwt_token() {
-    local secret=$1
-    local role=$2
-    local expiry_years=20
-
-    local header='{"alg":"HS256","typ":"JWT"}'
-    
-    local now
-    now=$(date +%s)
-    local exp
-    exp=$((now + expiry_years * 365 * 24 * 60 * 60))
-
-    local payload
-    payload=$(printf '{"role":"%s","iss":"supabase","iat":%d,"exp":%d}' "$role" "$now" "$exp")
-
-    local header_base64
-    header_base64=$(printf "%s" "$header" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-    local payload_base64
-    payload_base64=$(printf "%s" "$payload" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-
-    local signed_content="${header_base64}.${payload_base64}"
-    
-    local signature
-    signature=$(printf "%s" "$signed_content" | openssl dgst -binary -sha256 -hmac "$secret" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-
-    echo "${signed_content}.${signature}"
-}
-
-# --- Основная логика скрипта ---
-main() {
-    # --- Этап 1: Приветствие и проверка системы ---
-    clear
-    echo -e "${C_WHITE_BOLD}"
-    echo "================================================================="
-    echo "|| Welcome to the MEDIA WORKS Stack Installer ||"
-    echo "================================================================="
-    echo -e "${C_RESET}"
-
-    info "Проверка системных зависимостей..."
-    for cmd in curl git sudo; do
-        if! command -v $cmd &> /dev/null; then
-            error "Команда '$cmd' не найдена. Пожалуйста, установите ее и запустите скрипт снова."
-        fi
-    done
-    success "Все зависимости на месте."
-
-    if [ "$(id -u)" -ne 0 ]; then
+C_RESET='\033; then
         error "Этот скрипт должен быть запущен с правами root или через sudo."
     fi
 
@@ -200,7 +120,7 @@ main() {
     chmod 600 "${PROJECT_DIR}/configs/traefik/acme.json"
     success "Сетевая инфраструктура готова."
 
-    if]; then
+    if; then
         info "Запуск изолированного стека Supabase..."
         (cd "$SUPABASE_DIR" && docker compose up -d)
         success "Стек Supabase запущен."
@@ -222,7 +142,7 @@ main() {
         warn "n8n UI ответил со статусом ${n8n_status}. Возможны проблемы с запуском."
     fi
 
-    if]; then
+    if; then
         SUPABASE_URL="https://${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}"
         supabase_status=$(curl -s -o /dev/null -w "%{http_code}" "$SUPABASE_URL")
         if [ "$supabase_status" -eq 200 ]; then
