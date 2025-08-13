@@ -198,7 +198,8 @@ warning() {
 }
 
 info() {
-    echo -e "${BLUE}ℹ ИНФОРМАЦИЯ:${NC} $*" | tee -a "${LOG_FILE}"
+    echo -e "${BLUE}ℹ ИНФОРМАЦИЯ:${NC} $*" >> "${LOG_FILE}"
+    echo -e "${BLUE}ℹ ИНФОРМАЦИЯ:${NC} $*"
 }
 
 success() {
@@ -810,10 +811,9 @@ health_check_with_animation() {
                               "Traefik:localhost:8080:/ping")
             ;;
         "$MODE_STANDARD"|"$MODE_RAG")
-            services_to_check=("PostgreSQL:supabase-db:pg_isready -U postgres"
-                                "Kong API:supabase-kong:kong health"
-                                "N8N:n8n:wget --spider -q http://localhost:5678/healthz"
-                                "Traefik:traefik:wget --spider -q http://localhost:8080/ping")
+             services_to_check=("PostgreSQL:supabase-db:sh -c 'pg_isready -U postgres'"
+                                "N8N:n8n:sh -c 'curl -f http://localhost:5678/healthz'"
+                                "Traefik:traefik:sh -c 'curl -f http://localhost:8080/ping'")
             ;;
         "$MODE_LIGHTWEIGHT")
             services_to_check=("PostgreSQL:postgres:pg_isready -U postgres"
@@ -1192,8 +1192,8 @@ services:
       db:
         condition: service_healthy
     environment:
-      - N8N_HOST=${N8N_HOST}
-      - N8N_PORT=${N8N_PORT}
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: ${N8N_PORT}
       - N8N_PROTOCOL=${N8N_PROTOCOL}
       - NODE_ENV=production
       - WEBHOOK_URL=${WEBHOOK_URL}
