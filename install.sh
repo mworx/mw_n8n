@@ -12,14 +12,14 @@ fi
 
 # ============================================================================
 # MEDIA WORKS - Автоматизированная установка Supabase + N8N + Traefik
-# Версия: 4.1.0 (Исправленная)
+# Версия: 4.1.1 (Исправленная)
 # Автор: MEDIA WORKS DevOps Team
 # Описание: Production-ready установщик с 4 режимами и генерацией
 #           корректных Docker Compose конфигураций.
 # ============================================================================
 
 # ============================ КОНСТАНТЫ =====================================
-readonly SCRIPT_VERSION="4.1.0"
+readonly SCRIPT_VERSION="4.1.1"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 readonly LOG_FILE="/tmp/mediaworks_install_${TIMESTAMP}.log"
@@ -59,7 +59,8 @@ show_spinner() {
 }
 
 show_media_works_logo() {
-    clear
+    # ИСПРАВЛЕНИЕ: `clear || true` не прервет выполнение скрипта, если `clear` недоступен
+    clear || true
     cat << 'EOF'
     ███╗   ███╗███████╗██████╗ ██╗ █████╗     ██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗███████╗
     ████╗ ████║██╔════╝██╔══██╗██║██╔══██╗    ██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝██╔════╝
@@ -691,6 +692,7 @@ create_docker_compose_file() {
     esac
     
     # Хешируем пароль для Traefik Basic Auth и вставляем его в docker-compose
+    source "$project_dir/.env"
     DASHBOARD_HASH=$(htpasswd -nbB admin "$DASHBOARD_PASSWORD" | cut -d ':' -f 2 | sed -e 's/\$/\$\$/g')
     sed -i "s|DASHBOARD_HASH|$DASHBOARD_HASH|" "$compose_file"
     
@@ -708,10 +710,10 @@ start_services() {
     
     { docker compose up -d --remove-orphans 2>&1 | tee -a "${LOG_FILE}"; } &
     show_spinner $! "Загрузка образов и запуск контейнеров"
-    wait $!
     # Проверяем код возврата `docker compose up`
-    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
-        error "Ошибка при запуске сервисов. Проверьте 'docker compose -f $project_dir/docker-compose.yml logs'."
+    local status=${PIPESTATUS[0]}
+    if [[ $status -ne 0 ]]; then
+        error "Ошибка при запуске сервисов (код: $status). Проверьте 'docker compose -f $project_dir/docker-compose.yml logs'."
     fi
     success "Все сервисы запущены в фоновом режиме."
 }
@@ -805,7 +807,7 @@ EOF
 display_final_summary() {
     local project_dir=$1 domain=$2 mode=$3
     source "$project_dir/.env"
-    clear
+    clear || true
     show_media_works_logo
     echo -e "${GREEN}${SPARKLES} УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ${SPARKLES}${NC}\n"
     echo -e "    ${CYAN}Режим:${NC} $mode | ${CYAN}Проект:${NC} $(basename $project_dir) | ${CYAN}Домен:${NC} $domain\n"
@@ -818,7 +820,7 @@ display_final_summary() {
 # ============================ ОСНОВНАЯ ФУНКЦИЯ ==============================
 
 main() {
-    show_media_works_logo && sleep 2
+    show_media_works_logo && sleep 1
     check_root
     check_system_requirements
     install_dependencies
