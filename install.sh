@@ -739,7 +739,7 @@ if [ "$INSTALLATION_MODE" = "full" ]; then
       - NODE_FUNCTION_ALLOW_EXTERNAL=*
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=${N8N_DB_HOST}
-      - DB_POSTGRESDB_PORT=${N8N_DB_PORT; then
+      - DB_POSTGRESDB_PORT=${N8N_DB_PORT}; then
   echo "Dumping n8n database from postgres-n8n..."
   docker exec -e PGPASSWORD="${N8N_DB_PASSWORD}" postgres-n8n \
     pg_dump -U postgres -d "${N8N_DB_NAME}" -Fc -f "/tmp/n8n_${TS}.dump" 2>/dev/null || {
