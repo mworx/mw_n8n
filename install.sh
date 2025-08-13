@@ -609,16 +609,17 @@ services:
                 ELSE
                   EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
                 END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') THEN
+                  CREATE DATABASE n8n OWNER n8n;
+                END IF;
               END $$;"
-        psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname='n8n'" | grep -q 1 || \
-          psql -h postgres -U postgres -d postgres -c "CREATE DATABASE n8n OWNER n8n;"
         psql -h postgres -U postgres -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     networks: [internal]
-
 EOF
 fi
+
 
 # RAG compose (урезанный supabase)
 if [ "$INSTALLATION_MODE" = "rag" ]; then
@@ -1052,26 +1053,22 @@ else
   docker compose -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
   wait_for_postgres supabase-db || err "Supabase DB не поднялся."
 
-    # Инициализация пользователя/БД для n8n в Supabase (важно: экранируем $$ в DO $$ … $$)
-    info "Инициализируем пользователя и БД n8n в Supabase..."
-    docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
-      psql -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 <<SQL
-  DO \$\$
-  BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
-      EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-    ELSE
-      EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
-    END IF;
+# Инициализация пользователя/БД для n8n в Supabase (без here-doc)
+info "Инициализируем пользователя и БД n8n в Supabase..."
+docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
+  psql -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 \
+  -c "DO \$\$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
+           EXECUTE format('CREATE ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+         ELSE
+           EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') THEN
+           CREATE DATABASE n8n OWNER n8n;
+         END IF;
+       END \$\$;" \
+  -c "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
 
-    IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') THEN
-      CREATE DATABASE n8n OWNER n8n;
-    END IF;
-  END
-  \$\$;
-
-  GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
-  SQL
 
 
 
