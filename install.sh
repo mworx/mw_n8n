@@ -697,80 +697,31 @@ INSTALL_TIMESTAMP=$TIMESTAMP
 POSTGRES_HOST=db
 POSTGRES_PORT=5432
 POSTGRES_DB=postgres
-POSTGRES_PASSWORD=$(echo "$credentials" | grep "POSTGRES_PASSWORD" | cut -d'=' -f2)
+POSTGRES_PASSWORD=$(echo "$credentials" | grep "POSTGRES_PASSWORD=" | cut -d'=' -f2)
 
 # JWT конфигурация (срок действия 20 лет)
-JWT_SECRET=$(echo "$credentials" | grep "JWT_SECRET" | cut -d'=' -f2)
+JWT_SECRET=$(echo "$credentials" | grep "JWT_SECRET=" | cut -d'=' -f2)
 JWT_EXPIRY=315360000
-ANON_KEY=$(echo "$credentials" | grep "ANON_KEY" | cut -d'=' -f2)
-SERVICE_ROLE_KEY=$(echo "$credentials" | grep "SERVICE_ROLE_KEY" | cut -d'=' -f2)
+ANON_KEY=$(echo "$credentials" | grep "ANON_KEY=" | cut -d'=' -f2)
+SERVICE_ROLE_KEY=$(echo "$credentials" | grep "SERVICE_ROLE_KEY=" | cut -d'=' -f2)
+
+# URL-адреса Supabase
+SITE_URL=https://$domain
+API_EXTERNAL_URL=https://$domain
+SUPABASE_PUBLIC_URL=https://$domain
 
 # Доступ к панели управления
-DASHBOARD_USERNAME=$(echo "$credentials" | grep "DASHBOARD_USERNAME" | cut -d'=' -f2)
-DASHBOARD_PASSWORD=$(echo "$credentials" | grep "DASHBOARD_PASSWORD" | cut -d'=' -f2)
+DASHBOARD_USERNAME=$(echo "$credentials" | grep "DASHBOARD_USERNAME=" | cut -d'=' -f2)
+DASHBOARD_PASSWORD=$(echo "$credentials" | grep "DASHBOARD_PASSWORD=" | cut -d'=' -f2)
 
 # N8N конфигурация
-N8N_BASIC_AUTH_USER=$(echo "$credentials" | grep "N8N_BASIC_AUTH_USER" | cut -d'=' -f2)
-N8N_BASIC_AUTH_PASSWORD=$(echo "$credentials" | grep "N8N_BASIC_AUTH_PASSWORD" | cut -d'=' -f2)
-
-# Redis (для режима Full)
-REDIS_PASSWORD=$(echo "$credentials" | grep "REDIS_PASSWORD" | cut -d'=' -f2)
-
-# Дополнительные секреты Supabase
-SECRET_KEY_BASE=$(echo "$credentials" | grep "SECRET_KEY_BASE" | cut -d'=' -f2)
-VAULT_ENC_KEY=$(echo "$credentials" | grep "VAULT_ENC_KEY" | cut -d'=' -f2)
-LOGFLARE_PUBLIC_ACCESS_TOKEN=$(echo "$credentials" | grep "LOGFLARE_PUBLIC_ACCESS_TOKEN" | cut -d'=' -f2)
-LOGFLARE_PRIVATE_ACCESS_TOKEN=$(echo "$credentials" | grep "LOGFLARE_PRIVATE_ACCESS_TOKEN" | cut -d'=' -f2)
-
-# Настройки Studio
-STUDIO_DEFAULT_ORGANIZATION=MEDIA WORKS
-STUDIO_DEFAULT_PROJECT=Production
-
-# Email конфигурация (отключена по умолчанию)
-ENABLE_EMAIL_SIGNUP=false
-ENABLE_EMAIL_AUTOCONFIRM=false
-SMTP_ADMIN_EMAIL=$email
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASS=
-SMTP_SENDER_NAME=MEDIA WORKS
-
-# Аутентификация по телефону (отключена)
-ENABLE_PHONE_SIGNUP=false
-ENABLE_PHONE_AUTOCONFIRM=false
-
-# Анонимные пользователи
-ENABLE_ANONYMOUS_USERS=false
-DISABLE_SIGNUP=false
-
-# Хранилище
-STORAGE_BACKEND=file
-IMGPROXY_ENABLE_WEBP_DETECTION=true
-
-# Функции
-FUNCTIONS_VERIFY_JWT=false
-
-# Конфигурация пула соединений
-POOLER_TENANT_ID=pooler
-POOLER_DEFAULT_POOL_SIZE=20
-POOLER_MAX_CLIENT_CONN=100
-POOLER_DB_POOL_SIZE=20
-POOLER_PROXY_PORT_TRANSACTION=6543
-
-# Порты Kong
-KONG_HTTP_PORT=8000
-KONG_HTTPS_PORT=8443
-
-# Docker
-DOCKER_SOCKET_LOCATION=/var/run/docker.sock
-
-# Дополнительные URL для редиректов
-ADDITIONAL_REDIRECT_URLS=
-MAILER_URLPATHS_INVITE=/auth/v1/verify
-MAILER_URLPATHS_CONFIRMATION=/auth/v1/verify
-MAILER_URLPATHS_RECOVERY=/auth/v1/verify
-MAILER_URLPATHS_EMAIL_CHANGE=/auth/v1/verify
+N8N_HOST=$domain
+N8N_PORT=5678
+N8N_PROTOCOL=https
+N8N_BASIC_AUTH_USER=$(echo "$credentials" | grep "N8N_BASIC_AUTH_USER=" | cut -d'=' -f2)
+N8N_BASIC_AUTH_PASSWORD=$(echo "$credentials" | grep "N8N_BASIC_AUTH_PASSWORD=" | cut -d'=' -f2)
+N8N_ENCRYPTION_KEY=$(generate_password 32)
+WEBHOOK_URL=https://$domain
 EOF
     
     # Очистка .env файла от лишних символов
@@ -819,7 +770,7 @@ start_services_with_progress() {
     
     for service in "${services[@]}"; do
         current=$((current + 1))
-        echo -e "\n  ${ARROW} Запуск сервиса: ${WHITE}$service${NC}"
+ #       echo -e "\n  ${ARROW} Запуск сервиса: ${WHITE}$service${NC}"
         
         {
             docker compose up -d "$service" 2>&1 | tee -a "${LOG_FILE}"
@@ -829,8 +780,8 @@ start_services_with_progress() {
         show_spinner $service_pid "Загрузка и запуск $service"
         wait $service_pid || true
         
-        show_progress $current $total "Запуск сервисов"
-        sleep 2
+ #       show_progress $current $total "Запуск сервисов"
+        sleep 1
     done
     
     echo ""
@@ -860,9 +811,9 @@ health_check_with_animation() {
             ;;
         "$MODE_STANDARD"|"$MODE_RAG")
             services_to_check=("PostgreSQL:supabase-db:pg_isready -U postgres"
-                              "Kong API:localhost:8000:/health"
-                              "N8N:localhost:5678:/healthz"
-                              "Traefik:localhost:8080:/ping")
+                                "Kong API:supabase-kong:kong health"
+                                "N8N:n8n:wget --spider -q http://localhost:5678/healthz"
+                                "Traefik:traefik:wget --spider -q http://localhost:8080/ping")
             ;;
         "$MODE_LIGHTWEIGHT")
             services_to_check=("PostgreSQL:postgres:pg_isready -U postgres"
