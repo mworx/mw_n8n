@@ -261,6 +261,35 @@ ANON_PAYLOAD=$(printf '{"role":"anon","iss":"supabase","iat":%d,"exp":%d}' "$now
 SERVICE_PAYLOAD=$(printf '{"role":"service_role","iss":"supabase","iat":%d,"exp":%d}' "$now_epoch" "$exp_epoch")
 ANON_KEY="$(jwt_hs256 "$JWT_SECRET" "$ANON_PAYLOAD")"
 SERVICE_ROLE_KEY="$(jwt_hs256 "$JWT_SECRET" "$SERVICE_PAYLOAD")"
+# Доп.секреты/дефолты для предупреждений compose
+SECRET_KEY_BASE="$(gen_alnum 64)"
+VAULT_ENC_KEY="$(gen_alnum 64)"
+LOGFLARE_PUBLIC_ACCESS_TOKEN="$(gen_alnum 48)"
+LOGFLARE_PRIVATE_ACCESS_TOKEN="$(gen_alnum 48)"
+
+# Пулер (Supavisor)
+POOLER_PROXY_PORT_TRANSACTION="6543"
+POOLER_DEFAULT_POOL_SIZE="20"
+POOLER_MAX_CLIENT_CONN="100"
+POOLER_TENANT_ID="${PROJECT_NAME}"
+POOLER_DB_POOL_SIZE="5"
+
+# Функции/аутентификация/почта — дефолты, чтобы не было WARN
+FUNCTIONS_VERIFY_JWT="false"
+ADDITIONAL_REDIRECT_URLS=""
+DISABLE_SIGNUP="false"
+MAILER_URLPATHS_CONFIRMATION="/auth/v1/verify"
+MAILER_URLPATHS_INVITE="/auth/v1/verify"
+MAILER_URLPATHS_RECOVERY="/auth/v1/verify"
+MAILER_URLPATHS_EMAIL_CHANGE="/auth/v1/verify"
+# Если SMTP не включали — задаём «пустые, но существующие» значения
+: "${SMTP_HOST:=}"
+: "${SMTP_PORT:=}"
+: "${SMTP_USER:=}"
+: "${SMTP_PASS:=}"
+: "${SMTP_SENDER_NAME:=}"
+: "${SMTP_ADMIN_EMAIL:=admin@${ROOT_DOMAIN}}"
+
 ok "Секреты сгенерированы."
 
 # n8n DB host/password должны быть определены ДО сборки .env (из-за set -u)
@@ -329,6 +358,34 @@ ENABLE_ANONYMOUS_USERS=true
 ENABLE_EMAIL_AUTOCONFIRM=false
 ENABLE_PHONE_SIGNUP=false
 ENABLE_PHONE_AUTOCONFIRM=false
+
+SECRET_KEY_BASE=${SECRET_KEY_BASE}
+VAULT_ENC_KEY=${VAULT_ENC_KEY}
+
+LOGFLARE_PUBLIC_ACCESS_TOKEN=${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+LOGFLARE_PRIVATE_ACCESS_TOKEN=${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+
+POOLER_PROXY_PORT_TRANSACTION=${POOLER_PROXY_PORT_TRANSACTION}
+POOLER_DEFAULT_POOL_SIZE=${POOLER_DEFAULT_POOL_SIZE}
+POOLER_MAX_CLIENT_CONN=${POOLER_MAX_CLIENT_CONN}
+POOLER_TENANT_ID=${POOLER_TENANT_ID}
+POOLER_DB_POOL_SIZE=${POOLER_DB_POOL_SIZE}
+
+FUNCTIONS_VERIFY_JWT=${FUNCTIONS_VERIFY_JWT}
+ADDITIONAL_REDIRECT_URLS=${ADDITIONAL_REDIRECT_URLS}
+DISABLE_SIGNUP=${DISABLE_SIGNUP}
+MAILER_URLPATHS_CONFIRMATION=${MAILER_URLPATHS_CONFIRMATION}
+MAILER_URLPATHS_INVITE=${MAILER_URLPATHS_INVITE}
+MAILER_URLPATHS_RECOVERY=${MAILER_URLPATHS_RECOVERY}
+MAILER_URLPATHS_EMAIL_CHANGE=${MAILER_URLPATHS_EMAIL_CHANGE}
+
+# SMTP блок (для отправки писем рекомендуем любой SMTP Relay)
+SMTP_HOST=${SMTP_HOST}
+SMTP_PORT=${SMTP_PORT}
+SMTP_USER=${SMTP_USER}
+SMTP_PASS=${SMTP_PASS}
+SMTP_SENDER_NAME=${SMTP_SENDER_NAME}
+SMTP_ADMIN_EMAIL=${SMTP_ADMIN_EMAIL}
 EOF
 
 # SMTP блок при выборе (добавляем поверх)
@@ -434,6 +491,12 @@ if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ]; t
   mkdir -p "${PROJECT_DIR}/volumes/api"
   cp -rT /root/supabase/docker/volumes/api "${PROJECT_DIR}/volumes/api"  
 fi
+
+# db не должен стопориться, если vector «unhealthy»
+if [ -f "${PROJECT_DIR}/compose.supabase.yml" ]; then
+  sed -i '0,/\bdb:\b/{:a;N;/depends_on:/!ba;s/vector:\s*\n\s*condition:\s*service_healthy/vector:\n        condition: service_started/}' "${PROJECT_DIR}/compose.supabase.yml"
+fi
+
 
 # Патчим vector: монтируем директорию, а не файл (исправляет "not a directory")
 if [ -f "${PROJECT_DIR}/compose.supabase.yml" ]; then
