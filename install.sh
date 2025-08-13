@@ -1040,54 +1040,60 @@ display_final_summary() {
     local domain=$2
     local mode=$3
     
+    clear
+    show_media_works_logo
     
     echo -e "\n${GREEN}${SPARKLES} УСТАНОВКА ЗАВЕРШЕНА УСПЕШНО! ${SPARKLES}${NC}\n"
     
-    cat << EOF
+    cat << 'EOF'
 
     ╔══════════════════════════════════════════════════════════════════╗
     ║                      СВОДНАЯ ИНФОРМАЦИЯ                          ║
     ╚══════════════════════════════════════════════════════════════════╝
-
-    ${CYAN}Режим установки:${NC}    $mode
-    ${CYAN}Директория:${NC}         $project_dir
-    ${CYAN}Домен:${NC}              $domain
-
-    ╔══════════════════════════════════════════════════════════════════╗
-    ║                         ТОЧКИ ДОСТУПА                             ║
-    ╚══════════════════════════════════════════════════════════════════╝
-
-    ${GREEN}Supabase Studio:${NC}    https://studio.$domain
-    ${GREEN}N8N Workflows:${NC}      https://$domain
-    ${GREEN}Traefik Admin:${NC}      https://traefik.$domain
+EOF
+    echo -e "    ${CYAN}Режим установки:${NC}    $mode"
+    echo -e "    ${CYAN}Директория:${NC}         $project_dir"
+    echo -e "    ${CYAN}Домен:${NC}              $domain"
+    
+    cat << 'EOF'
 
     ╔══════════════════════════════════════════════════════════════════╗
-    ║                      СЛЕДУЮЩИЕ ШАГИ                               ║
+    ║                         ТОЧКИ ДОСТУПА                            ║
     ╚══════════════════════════════════════════════════════════════════╝
+EOF
+    echo -e "    ${GREEN}Supabase Studio:${NC}    https://studio.$domain"
+    echo -e "    ${GREEN}N8N Workflows:${NC}      https://$domain"
+    echo -e "    ${GREEN}Traefik Admin:${NC}      https://traefik.$domain"
 
-    1. ${YELLOW}Проверьте файл с учетными данными:${NC}
-       cat $project_dir/credentials.txt
-
-    2. ${YELLOW}Просмотр статуса сервисов:${NC}
-       cd $project_dir && docker compose ps
-
-    3. ${YELLOW}Просмотр логов:${NC}
-       cd $project_dir && docker compose logs -f
+    cat << 'EOF'
 
     ╔══════════════════════════════════════════════════════════════════╗
-    ║                     ТЕХНИЧЕСКАЯ ПОДДЕРЖКА                         ║
+    ║                      СЛЕДУЮЩИЕ ШАГИ                              ║
     ╚══════════════════════════════════════════════════════════════════╝
+EOF
+    echo -e "    1. ${YELLOW}Проверьте файл с учетными данными:${NC}"
+    echo -e "       cat $project_dir/credentials.txt\n"
+    echo -e "    2. ${YELLOW}Просмотр статуса сервисов:${NC}"
+    echo -e "       cd $project_dir && docker compose ps\n"
+    echo -e "    3. ${YELLOW}Просмотр логов:${NC}"
+    echo -e "       cd $project_dir && docker compose logs -f"
 
-    ${CYAN}Email:${NC}     support@mediaworks.pro
-    ${CYAN}Telegram:${NC}  @mediaworks_support
-    ${CYAN}Docs:${NC}      https://docs.mediaworks.pro
+    cat << 'EOF'
+
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║                     ТЕХНИЧЕСКАЯ ПОДДЕРЖКА                        ║
+    ╚══════════════════════════════════════════════════════════════════╝
+EOF
+    echo -e "    ${CYAN}Email:${NC}     support@mworks.ru"
+    echo -e "    ${CYAN}Telegram:${NC}  @mediaworks_support"
+    echo -e "    ${CYAN}Docs:${NC}      https://docs.mediaworks.pro"
+
+    cat << 'EOF'
 
 EOF
-    
-    echo -e "${GREEN}════════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${WHITE}           Спасибо за использование MEDIA WORKS!${NC}"
-    echo -e "${GREEN}════════════════════════════════════════════════════════════════════${NC}\n"
-}
+}```
+
+После внесения этих двух исправлений (синтаксис YAML и отображение цветов) ваш скрипт должен завершаться полностью корректно, запуская все сервисы и показывая красивый финальный отчет.
 
 # ============================ СОЗДАНИЕ DOCKER COMPOSE =======================
 
@@ -1179,22 +1185,22 @@ services:
     environment:
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: ${N8N_PORT}
-      - N8N_PROTOCOL=${N8N_PROTOCOL}
-      - NODE_ENV=production
-      - WEBHOOK_URL=${WEBHOOK_URL}
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
-      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
-      - DB_POSTGRESDB_HOST=db
-      - DB_POSTGRESDB_PORT=${POSTGRES_PORT}
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-      - DB_POSTGRESDB_SCHEMA=n8n
-      - EXECUTIONS_MODE=regular
-      - N8N_METRICS=true
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      NODE_ENV: production
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_HOST: db
+      DB_POSTGRESDB_PORT: ${POSTGRES_PORT}
+      DB_POSTGRESDB_USER: postgres
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: n8n
+      EXECUTIONS_MODE: regular
+      N8N_METRICS: "true"
     volumes:
       - ./volumes/n8n:/home/node/.n8n
     healthcheck:
