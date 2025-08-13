@@ -1,536 +1,774 @@
-#!/bin/bash
-# =================================================================
-# # | | MEDIA WORKS - Universal Stack Installer ||
-# =================================================================
-# # | | ||
-# # | | Автоматизированный установщик для стека Supabase и n8n ||
-# # | | Версия: 1.1.0 ||
-# # | | Разработчик: Senior DevOps Engineer ||
-# # | | ||
-# =================================================================
+#!/usr/bin/env bash
+set -euo pipefail
 
-# --- Глобальные переменные и настройки ---
-set -e # Прерывать выполнение скрипта при любой ошибке
+# ================================
+# MEDIA WORKS — Deployment Master
+# n8n + Supabase + Traefik
+# Отдельные Postgres: supabase-db и postgres-n8n
+# ================================
 
-# --- Цветовые коды для вывода ---
-C_RESET='\033${C_RESET} $1"
+# ---------- Colors ----------
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}[ OK ]${NC} $*"; }
+info() { echo -e "${BLUE}[ INFO ]${NC} $*"; }
+warn() { echo -e "${YELLOW}[ WARN ]${NC} $*"; }
+err()  { echo -e "${RED}[ ERROR ]${NC} $*"; exit 1; }
+
+banner() {
+cat <<'BANNER'
+ __  _____________  _______       _       ______  ____  __ _______
+/  |/  / ____/ __ \/  _/   |     | |     / / __ \/ __ \/ //_/ ___/
+/ /|_/ / __/ / / / // // /| |     | | /| / / / / / /_/ / ,<  \__ \
+/ /  / / /___/ /_/ // // ___ |     | |/ |/ / /_/ / _, _/ /| |___/ /
+_/  /_/_____/_____/___/_/  |_|     |__/|__/\____/_/ |_/_/ |_/____/  m e d i a   w o r k s
+
+MEDIA WORKS — Automated Deployment Stack (Supabase + n8n + Traefik)
+BANNER
+}
+banner
+
+# ---------- Root / OS checks ----------
+[ "$(id -u)" -eq 0 ] || err "Запустите скрипт от root (sudo)."
+
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  OS_ID="${ID:-}"; OS_NAME="${NAME:-}"
+else
+  err "Не удалось определить дистрибутив (нет /etc/os-release)."
+fi
+
+case "$OS_ID" in
+  ubuntu|debian) ok "Обнаружена ОС: $OS_NAME" ;;
+  *) err "Поддерживаются только Debian/Ubuntu. Обнаружено: $OS_NAME" ;;
+esac
+
+# ---------- Helpers ----------
+retry_operation() {
+  local max_attempts=3 delay=5 attempt=1
+  while [ $attempt -le $max_attempts ]; do
+    if "$@"; then return 0; fi
+    warn "Попытка $attempt из $max_attempts не удалась. Повтор через ${delay}s..."
+    sleep "$delay"; attempt=$((attempt+1))
+  done
+  return 1
 }
 
-success() {
-    echo -e "${C_GREEN}[ OK ]${C_RESET} $1"
+gen_alnum() { # length
+  local len="${1:-32}"
+  ( set +o pipefail; tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len" ) || true
 }
 
-warn() {
-    echo -e "${C_YELLOW}${C_RESET} $1"
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+jwt_hs256() { # jwt_hs256 <secret> <json-payload>
+  local secret="$1" payload="$2"
+  local header='{"alg":"HS256","typ":"JWT"}'
+  local h b s
+  h=$(printf '%s' "$header" | b64url)
+  b=$(printf '%s' "$payload" | b64url)
+  s=$(printf '%s' "${h}.${b}" | openssl dgst -binary -sha256 -hmac "$secret" | b64url)
+  printf '%s.%s.%s' "$h" "$b" "$s"
 }
 
-error() {
-    echo -e "${C_RED}${C_RESET} $1" >&2
-    exit 1
+wait_for_postgres() { # container name
+  local svc="$1" max=60 i=1
+  while [ $i -le $max ]; do
+    if docker exec "$svc" pg_isready -U postgres >/dev/null 2>&1; then return 0; fi
+    sleep 2; i=$((i+1))
+  done
+  return 1
 }
 
-# --- Функции генерации ---
-generate_password() {
-    tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 32
+health_check_all_services() {
+  local failed=()
+
+  wait_healthy() {
+    local name="$1" tries=60
+    while [ $tries -gt 0 ]; do
+      local st
+      st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || true)"
+      if [ "$st" = "healthy" ] || [ "$st" = "running" ]; then return 0; fi
+      sleep 2; tries=$((tries-1))
+    done
+    return 1
+  }
+
+  # n8n + redis + postgres-n8n
+  wait_healthy n8n || failed+=("n8n")
+  wait_healthy redis || failed+=("redis")
+  wait_healthy postgres-n8n || failed+=("postgres-n8n")
+
+  if [ "${INSTALLATION_MODE}" != "light" ]; then
+    wait_healthy supabase-db     || failed+=("Supabase DB")
+    wait_healthy supabase-rest   || failed+=("Supabase REST")
+    wait_healthy supabase-auth   || failed+=("Supabase Auth")
+    # Kong не имеет нормального health: проверим, что слушает
+    if ! docker exec supabase-kong sh -c 'wget --spider -q http://localhost:8000/ || wget --spider -q http://localhost:8000/status' >/dev/null 2>&1; then
+      failed+=("Supabase Kong")
+    fi
+  fi
+
+  wait_healthy traefik || failed+=("Traefik")
+
+  if [ ${#failed[@]} -gt 0 ]; then
+    err "Следующие сервисы не прошли health check: ${failed[*]}"
+  fi
+  ok "Все сервисы работают корректно ✓"
 }
 
-generate_jwt_token() {
-    local secret=$1
-    local role=$2
-    local expiry_years=20
-    local header='{"alg":"HS256","typ":"JWT"}'
-    local now
-    now=$(date +%s)
-    local exp
-    exp=$((now + expiry_years * 365 * 24 * 60 * 60))
-    local payload
-    payload=$(printf '{"role":"%s","iss":"supabase","iat":%d,"exp":%d}' "$role" "$now" "$exp")
-    local header_base64
-    header_base64=$(printf "%s" "$header" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-    local payload_base64
-    payload_base64=$(printf "%s" "$payload" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-    local signed_content="${header_base64}.${payload_base64}"
-    local signature
-    signature=$(printf "%s" "$signed_content" | openssl dgst -binary -sha256 -hmac "$secret" | base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n')
-    echo "${signed_content}.${signature}"
-}
+# ---------- Ask inputs ----------
+echo
+info "Введите параметры установки (обязательные помечены *):"
+read -rp " * Имя проекта (каталог в /root): " PROJECT_NAME
+[ -n "${PROJECT_NAME:-}" ] || err "Имя проекта обязательно."
+PROJECT_NAME="$(printf '%s' "$PROJECT_NAME" | tr -d '\r')"
+PROJECT_DIR="/root/${PROJECT_NAME}"
 
-# --- Функции создания конфигурационных файлов ---
-create_project_files() {
-    info "Готовим.env для проекта..."
-    cat <<EOF > "${PROJECT_DIR}/.env"
-# --- Project Settings ---
-PROJECT_NAME=${PROJECT_NAME}
-MAIN_DOMAIN=${MAIN_DOMAIN}
-NETWORK_NAME=${PROJECT_NAME}_main_net
-# --- Traefik ---
-LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
-N8N_DOMAIN=${N8N_SUBDOMAIN}.${MAIN_DOMAIN}
-SUPABASE_DOMAIN=${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}
-# --- n8n Database ---
-N8N_DB_USER=n8n
-N8N_DB_PASSWORD=${N8N_DB_PASSWORD}
+read -rp " * Основной домен (example.com): " ROOT_DOMAIN
+[ -n "${ROOT_DOMAIN:-}" ] || err "Основной домен обязателен."
+
+DEFAULT_N8N_SUB="n8n.${ROOT_DOMAIN}"
+read -rp " * Поддомен для n8n [${DEFAULT_N8N_SUB}]: " N8N_HOST
+N8N_HOST="${N8N_HOST:-$DEFAULT_N8N_SUB}"
+
+DEF_STUDIO="studio.${ROOT_DOMAIN}"
+read -rp "   Поддомен Supabase Studio [${DEF_STUDIO}]: " STUDIO_HOST
+STUDIO_HOST="${STUDIO_HOST:-$DEF_STUDIO}"
+
+DEF_API="api.${ROOT_DOMAIN}"
+read -rp "   Поддомен API (Kong) [${DEF_API}]: " API_HOST
+API_HOST="${API_HOST:-$DEF_API}"
+
+read -rp " * Email для Let's Encrypt: " ACME_EMAIL
+[ -n "${ACME_EMAIL:-}" ] || err "Email обязателен для ACME."
+
+read -rp "Установить и настроить SMTP параметры для Supabase? (y/N): " WANT_SMTP
+WANT_SMTP="${WANT_SMTP:-N}"
+if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
+  read -rp " SMTP Host: " SMTP_HOST
+  read -rp " SMTP Port (обычно 587/465): " SMTP_PORT
+  read -rp " SMTP User: " SMTP_USER
+  read -rsp " SMTP Password: " SMTP_PASS; echo
+  read -rp " SMTP Sender Name (например, 'My App'): " SMTP_SENDER_NAME
+  read -rp " SMTP Admin Email: " SMTP_ADMIN_EMAIL
+else
+  SMTP_HOST=""; SMTP_PORT=""; SMTP_USER=""; SMTP_PASS=""
+  SMTP_SENDER_NAME=""; SMTP_ADMIN_EMAIL=""
+fi
+
+echo
+info "Выберите режим установки:"
+echo "  1) FULL — Supabase(всё) + n8n main+worker + Redis + Traefik"
+echo "  2) STANDARD — Supabase(всё) + n8n (single) + Traefik"
+echo "  3) RAG — Supabase (vector, studio, kong, rest, meta, pooler, auth, db) + n8n + Traefik"
+echo "  4) LIGHT — n8n + Postgres (отдельный) + Traefik (без Supabase)"
+read -rp "Выбор [1-4]: " MODE_SEL
+case "${MODE_SEL:-}" in
+  1) INSTALLATION_MODE="full" ;;
+  2) INSTALLATION_MODE="standard" ;;
+  3) INSTALLATION_MODE="rag" ;;
+  4) INSTALLATION_MODE="light" ;;
+  *) err "Неверный выбор режима." ;;
+esac
+ok "Режим: ${INSTALLATION_MODE^^}"
+
+# ---------- Install dependencies ----------
+info "Устанавливаем зависимости (curl, git, docker, docker compose)..."
+retry_operation apt-get update -y || err "apt-get update не удалось."
+retry_operation apt-get install -y ca-certificates curl gnupg lsb-release git wget openssl || err "Не удалось установить базовые пакеты."
+
+if ! command -v docker >/dev/null 2>&1; then
+  info "Устанавливаем Docker (официальный скрипт)..."
+  retry_operation sh -c "curl -fsSL https://get.docker.com | sh" || err "Установка Docker не удалась."
+  systemctl enable docker >/dev/null 2>&1 || true
+  systemctl start docker  >/dev/null 2>&1 || true
+fi
+ok "Docker установлен."
+
+if ! docker compose version >/dev/null 2>&1; then
+  info "Устанавливаем docker compose-plugin..."
+  retry_operation apt-get install -y docker-compose-plugin || warn "Не удалось поставить docker-compose-plugin из apt."
+fi
+docker compose version >/dev/null 2>&1 || err "docker compose недоступен."
+
+# ---------- Prepare directories ----------
+info "Готовим структуру каталогов..."
+mkdir -p "/root/supabase"
+mkdir -p "${PROJECT_DIR}/"{configs/traefik/dynamic,configs/supabase,volumes/traefik,volumes/n8n,volumes/postgres_n8n,volumes/logs,volumes/pooler,volumes/db,volumes/api,data,logs,scripts}
+touch "${PROJECT_DIR}/volumes/traefik/acme.json"
+chmod 600 "${PROJECT_DIR}/volumes/traefik/acme.json"
+
+# ---------- Clone Supabase (once/update) ----------
+if [ ! -d "/root/supabase/.git" ]; then
+  info "Клонируем Supabase (self-hosted) репозиторий..."
+  git clone --depth=1 https://github.com/supabase/supabase.git /root/supabase || err "Клонирование supabase не удалось."
+else
+  info "Supabase репозиторий уже есть, обновляем..."
+  (cd /root/supabase && git fetch --depth 1 origin && git reset --hard origin/HEAD) || warn "Не удалось обновить supabase, продолжим с текущей копией."
+fi
+
+# ---------- Generate secrets ----------
+info "Генерируем пароли и ключи..."
+POSTGRES_PASSWORD="$(gen_alnum 32)"      # для Supabase DB
+N8N_PG_PASSWORD="$(gen_alnum 32)"        # для postgres-n8n
+N8N_ENCRYPTION_KEY="$(gen_alnum 32)"
+REDIS_PASSWORD="$(gen_alnum 24)"
+DASHBOARD_USERNAME="admin"
+DASHBOARD_PASSWORD="$(gen_alnum 24)"
+JWT_SECRET="$(gen_alnum 40)"
+
+now_epoch=$(date +%s)
+exp_epoch=$(( now_epoch + 20*365*24*3600 )) # ~20 лет
+ANON_PAYLOAD=$(printf '{"role":"anon","iss":"supabase","iat":%d,"exp":%d}' "$now_epoch" "$exp_epoch")
+SERVICE_PAYLOAD=$(printf '{"role":"service_role","iss":"supabase","iat":%d,"exp":%d}' "$now_epoch" "$exp_epoch")
+ANON_KEY="$(jwt_hs256 "$JWT_SECRET" "$ANON_PAYLOAD")"
+SERVICE_ROLE_KEY="$(jwt_hs256 "$JWT_SECRET" "$SERVICE_PAYLOAD")"
+
+# Доп.секреты для снижения WARN
+SECRET_KEY_BASE="$(gen_alnum 64)"
+VAULT_ENC_KEY="$(gen_alnum 64)"
+LOGFLARE_PUBLIC_ACCESS_TOKEN="$(gen_alnum 48)"
+LOGFLARE_PRIVATE_ACCESS_TOKEN="$(gen_alnum 48)"
+POOLER_PROXY_PORT_TRANSACTION="6543"
+POOLER_DEFAULT_POOL_SIZE="20"
+POOLER_MAX_CLIENT_CONN="100"
+POOLER_TENANT_ID="${PROJECT_NAME}"
+POOLER_DB_POOL_SIZE="5"
+FUNCTIONS_VERIFY_JWT="false"
+ADDITIONAL_REDIRECT_URLS=""
+DISABLE_SIGNUP="false"
+MAILER_URLPATHS_CONFIRMATION="/auth/v1/verify"
+MAILER_URLPATHS_INVITE="/auth/v1/verify"
+MAILER_URLPATHS_RECOVERY="/auth/v1/verify"
+MAILER_URLPATHS_EMAIL_CHANGE="/auth/v1/verify"
+: "${SMTP_HOST:=}"
+: "${SMTP_PORT:=587}"        # ВАЖНО: число, иначе GoTrue падает
+: "${SMTP_USER:=}"
+: "${SMTP_PASS:=}"
+: "${SMTP_SENDER_NAME:=}"
+: "${SMTP_ADMIN_EMAIL:=admin@${ROOT_DOMAIN}}"
+ok "Секреты сгенерированы."
+
+# ---------- Build .env ----------
+info "Готовим .env..."
+cat > "${PROJECT_DIR}/.env" <<EOF
+# --- MEDIA WORKS generated .env (${PROJECT_NAME}) ---
+
+# Mode / domains
+INSTALLATION_MODE=${INSTALLATION_MODE}
+ROOT_DOMAIN=${ROOT_DOMAIN}
+N8N_HOST=${N8N_HOST}
+STUDIO_HOST=${STUDIO_HOST}
+API_HOST=${API_HOST}
+ACME_EMAIL=${ACME_EMAIL}
+
+# Supabase core
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_DB=postgres
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+PGRST_DB_SCHEMAS=public
+
+JWT_SECRET=${JWT_SECRET}
+ANON_KEY=${ANON_KEY}
+SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}
+JWT_EXPIRY=630720000
+
+DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
+
+SUPABASE_PUBLIC_URL=https://${API_HOST}
+SITE_URL=https://${STUDIO_HOST}
+API_EXTERNAL_URL=https://${API_HOST}
+
+KONG_HTTP_PORT=8000
+KONG_HTTPS_PORT=8443
+IMGPROXY_ENABLE_WEBP_DETECTION=true
+
+# Vector / Docker socket
+DOCKER_SOCKET_LOCATION=/var/run/docker.sock
+
+# Studio defaults
+STUDIO_DEFAULT_ORGANIZATION="MEDIA WORKS"
+STUDIO_DEFAULT_PROJECT=${PROJECT_NAME}
+
+# n8n / Redis
+N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+REDIS_PASSWORD=${REDIS_PASSWORD}
+
+# n8n DB (отдельный Postgres)
+N8N_DB_HOST=postgres-n8n
+N8N_DB_PORT=5432
 N8N_DB_NAME=n8n
-N8N_DB_HOST=n8n-db
-# --- n8n Settings ---
-GENERIC_TIMEZONE=Europe/Moscow
-TZ=Europe/Moscow
-WEBHOOK_URL=https://\${N8N_DOMAIN}/
-EOF
-    if$ ]]; then
-        cat <<EOF >> "${PROJECT_DIR}/.env"
-# --- SMTP Settings ---
-N8N_EMAIL_MODE=smtp
+N8N_DB_USER=n8n
+N8N_DB_PASSWORD=${N8N_PG_PASSWORD}
+
+# Auth toggles
+ENABLE_EMAIL_SIGNUP=false
+ENABLE_ANONYMOUS_USERS=true
+ENABLE_EMAIL_AUTOCONFIRM=false
+ENABLE_PHONE_SIGNUP=false
+ENABLE_PHONE_AUTOCONFIRM=false
+
+# Defaults to silence WARNs
+SECRET_KEY_BASE=${SECRET_KEY_BASE}
+VAULT_ENC_KEY=${VAULT_ENC_KEY}
+LOGFLARE_PUBLIC_ACCESS_TOKEN=${LOGFLARE_PUBLIC_ACCESS_TOKEN}
+LOGFLARE_PRIVATE_ACCESS_TOKEN=${LOGFLARE_PRIVATE_ACCESS_TOKEN}
+POOLER_PROXY_PORT_TRANSACTION=${POOLER_PROXY_PORT_TRANSACTION}
+POOLER_DEFAULT_POOL_SIZE=${POOLER_DEFAULT_POOL_SIZE}
+POOLER_MAX_CLIENT_CONN=${POOLER_MAX_CLIENT_CONN}
+POOLER_TENANT_ID=${POOLER_TENANT_ID}
+POOLER_DB_POOL_SIZE=${POOLER_DB_POOL_SIZE}
+FUNCTIONS_VERIFY_JWT=${FUNCTIONS_VERIFY_JWT}
+ADDITIONAL_REDIRECT_URLS=${ADDITIONAL_REDIRECT_URLS}
+DISABLE_SIGNUP=${DISABLE_SIGNUP}
+MAILER_URLPATHS_CONFIRMATION=${MAILER_URLPATHS_CONFIRMATION}
+MAILER_URLPATHS_INVITE=${MAILER_URLPATHS_INVITE}
+MAILER_URLPATHS_RECOVERY=${MAILER_URLPATHS_RECOVERY}
+MAILER_URLPATHS_EMAIL_CHANGE=${MAILER_URLPATHS_EMAIL_CHANGE}
+
+# SMTP
 SMTP_HOST=${SMTP_HOST}
 SMTP_PORT=${SMTP_PORT}
 SMTP_USER=${SMTP_USER}
-SMTP_PASS=${SMTP_PASS_ESCAPED}
-SMTP_SENDER=${SMTP_SENDER_NAME}
-N8N_EMAIL_FROM=${SMTP_ADMIN_EMAIL}
-SMTP_SSL=true
+SMTP_PASS=${SMTP_PASS}
+SMTP_SENDER_NAME=${SMTP_SENDER_NAME}
+SMTP_ADMIN_EMAIL=${SMTP_ADMIN_EMAIL}
 EOF
-    fi
-    if]; then
-        cat <<EOF >> "${PROJECT_DIR}/.env"
-# --- n8n Queue Mode ---
-EXECUTIONS_MODE=queue
-QUEUE_BULL_REDIS_HOST=redis
-QUEUE_BULL_REDIS_PORT=6379
-QUEUE_HEALTH_CHECK_ACTIVE=true
-N8N_CONCURRENCY=10
+
+if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
+  cat >> "${PROJECT_DIR}/.env" <<EOF
+ENABLE_EMAIL_SIGNUP=true
+ENABLE_ANONYMOUS_USERS=false
+ENABLE_EMAIL_AUTOCONFIRM=true
+ENABLE_PHONE_SIGNUP=false
+ENABLE_PHONE_AUTOCONFIRM=false
 EOF
-    else
-        cat <<EOF >> "${PROJECT_DIR}/.env"
-# --- n8n Regular Mode ---
-EXECUTIONS_MODE=own
+fi
+
+# sanitize
+sed -i 's/[[:space:]]*$//' "${PROJECT_DIR}/.env"
+sed -i 's/\r$//' "${PROJECT_DIR}/.env"
+sed -i '/^[A-Za-z0-9_]\+:\s\+.*/d' "${PROJECT_DIR}/.env"
+sed -i 's/^\([A-Z0-9_]\+\)[[:space:]]*=[[:space:]]*/\1=/' "${PROJECT_DIR}/.env"
+grep -E '^[A-Z0-9_]+=' "${PROJECT_DIR}/.env" >/dev/null || err "Invalid .env format (нет KEY=VALUE)."
+
+# ---------- Traefik config ----------
+info "Создаём конфигурацию Traefik..."
+cat > "${PROJECT_DIR}/configs/traefik/traefik.yml" <<'EOF'
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    exposedByDefault: false
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${LETSENCRYPT_EMAIL}
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
 EOF
-    fi
-    success ".env для проекта готов."
 
-    info "Готовим Docker Compose для проекта..."
-    local n8n_services_yaml=""
-    local n8n_base_env_yaml
-    n8n_base_env_yaml=$(cat <<'YAML'
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=\${N8N_DB_HOST}
-      - DB_POSTGRESDB_USER=\${N8N_DB_USER}
-      - DB_POSTGRESDB_PASSWORD=\${N8N_DB_PASSWORD}
-      - DB_POSTGRESDB_DATABASE=\${N8N_DB_NAME}
-      - N8N_HOST=\${N8N_DOMAIN}
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=https
-      - NODE_ENV=production
-      - WEBHOOK_URL=\${WEBHOOK_URL}
-      - GENERIC_TIMEZONE=\${GENERIC_TIMEZONE}
-      - TZ=\${TZ}
-      - EXECUTIONS_MODE=\${EXECUTIONS_MODE}
-      - N8N_EMAIL_MODE=\${N8N_EMAIL_MODE}
-      - SMTP_HOST=\${SMTP_HOST}
-      - SMTP_PORT=\${SMTP_PORT}
-      - SMTP_USER=\${SMTP_USER}
-      - SMTP_PASS=\${SMTP_PASS}
-      - SMTP_SENDER=\${SMTP_SENDER}
-      - N8N_EMAIL_FROM=\${N8N_EMAIL_FROM}
-      - SMTP_SSL=\${SMTP_SSL}
-YAML
-)
 
-    case "$INSTALL_CHOICE" in
-        "1") # Full Stack
-            n8n_services_yaml=$(cat <<YAML
-  n8n:
-    image: n8nio/n8n
-    container_name: \${PROJECT_NAME}_n8n_main
-    restart: always
-    ports:
-      - "127.0.0.1:5678:5678"
-    environment:
-${n8n_base_env_yaml}
-      - QUEUE_BULL_REDIS_HOST=\${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=\${QUEUE_BULL_REDIS_PORT}
-      - QUEUE_HEALTH_CHECK_ACTIVE=\${QUEUE_HEALTH_CHECK_ACTIVE}
-    networks:
-      - main_net
-    volumes:
-      -./n8n-data:/home/node/.n8n
-    depends_on:
-      - n8n-db
-      - redis
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.n8n.rule=Host(`\${N8N_DOMAIN}`)"
-      - "traefik.http.routers.n8n.entrypoints=websecure"
-      - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
-      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
 
-  n8n-worker:
-    image: n8nio/n8n
-    container_name: \${PROJECT_NAME}_n8n_worker
-    command: worker
-    restart: always
-    environment:
-${n8n_base_env_yaml}
-      - QUEUE_BULL_REDIS_HOST=\${QUEUE_BULL_REDIS_HOST}
-      - QUEUE_BULL_REDIS_PORT=\${QUEUE_BULL_REDIS_PORT}
-      - N8N_CONCURRENCY=\${N8N_CONCURRENCY}
-    networks:
-      - main_net
-    volumes:
-      -./n8n-data:/home/node/.n8n
-    depends_on:
-      - n8n-db
-      - redis
-      - n8n
+cat > "${PROJECT_DIR}/configs/traefik/dynamic/security.yml" <<'EOF'
+http:
+  middlewares:
+    mw-https-redirect:
+      redirectScheme: { scheme: https, permanent: true }
+    mw-sec-headers:
+      headers:
+        sslRedirect: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "no-referrer-when-downgrade"
+    mw-ratelimit:
+      rateLimit: { average: 100, burst: 200 }
+  routers: {}
+  services: {}
+EOF
 
-  redis:
-    image: redis:latest
-    container_name: \${PROJECT_NAME}_redis
-    restart: always
-    networks:
-      - main_net
-    volumes:
-      - redis_data:/data
-YAML
-)
-            ;;
-        "2"|"3"|"4") # Standard, RAG, Lightweight
-            n8n_services_yaml=$(cat <<YAML
-  n8n:
-    image: n8nio/n8n
-    container_name: \${PROJECT_NAME}_n8n_main
-    restart: always
-    ports:
-      - "127.0.0.1:5678:5678"
-    environment:
-${n8n_base_env_yaml}
-    networks:
-      - main_net
-    volumes:
-      -./n8n-data:/home/node/.n8n
-    depends_on:
-      - n8n-db
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.n8n.rule=Host(`\${N8N_DOMAIN}`)"
-      - "traefik.http.routers.n8n.entrypoints=websecure"
-      - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
-      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
-YAML
-)
-            ;;
-    esac
+# ---------- Compose files ----------
+info "Готовим Docker Compose файлы..."
 
-    cat <<EOF > "${PROJECT_DIR}/docker-compose.yml"
-version: '3.8'
+# 1) Базовый Supabase compose для режимов, где он нужен
+if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ] || [ "$INSTALLATION_MODE" = "rag" ]; then
+  cp /root/supabase/docker/docker-compose.yml "${PROJECT_DIR}/compose.supabase.yml"
+
+  # Чистим и копируем требуемые volumes из репо
+  rm -rf "${PROJECT_DIR}/volumes/logs" "${PROJECT_DIR}/volumes/db" "${PROJECT_DIR}/volumes/pooler" "${PROJECT_DIR}/volumes/api"
+  mkdir -p "${PROJECT_DIR}/volumes"
+  cp -a /root/supabase/docker/volumes/logs   "${PROJECT_DIR}/volumes/"
+  cp -a /root/supabase/docker/volumes/db     "${PROJECT_DIR}/volumes/"
+  cp -a /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/"
+  cp -a /root/supabase/docker/volumes/api    "${PROJECT_DIR}/volumes/"
+
+  # db не должен ждать vector:healthy (только started)
+  sed -i '0,/\bdb:\b/{:a;N;/depends_on:/!ba;s/vector:\s*\n\s*condition:\s*service_healthy/vector:\n        condition: service_started/}' "${PROJECT_DIR}/compose.supabase.yml"
+  # vector: монтируем директорию, а не файл
+  sed -i 's#- \./volumes/logs/vector\.yml:/etc/vector/vector\.yml:ro,z#- ./volumes/logs:/etc/vector:ro,z#' "${PROJECT_DIR}/compose.supabase.yml"
+fi
+
+# 2) Наш override: Traefik + Redis + n8n + ОТДЕЛЬНЫЙ Postgres для n8n (+ init)
+cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options: { max-size: "10m", max-file: "3" }
+
+networks: { web: {}, internal: {} }
 
 services:
   traefik:
-    image: traefik:v2.10
-    container_name: \${PROJECT_NAME}_traefik
-    restart: always
+    <<: *common
+    image: traefik:2.11.9
+    container_name: traefik
     command:
-      - "--api.dashboard=true"
       - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=${PROJECT_WEB_NET}"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      - "--certificatesresolvers.letsencrypt.acme.email=\${LETSENCRYPT_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme.json"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-    ports:
-      - "80:80"
-      - "443:443"
-      - "8080:8080"
+      - "--entrypoints.ping.address=:8090"   # было :8080
+      - "--ping=true"
+      - "--ping.entrypoint=ping"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/acme/acme.json"
+      - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+    ports: [ "80:80", "443:443", "8090:8090" ]   # было 8080:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      -./configs/traefik/acme.json:/etc/traefik/acme.json
-    networks:
-      - main_net
+      - ./configs/traefik/traefik.yml:/traefik.yml:ro
+      - ./configs/traefik/dynamic/security.yml:/etc/traefik/dynamic/security.yml:ro
+      - ./volumes/traefik/acme.json:/acme/acme.json
+    networks: [ web ]
+    healthcheck:
+      test: ["CMD","wget","--spider","-q","http://localhost:8090/ping"]  # было 8080
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
-${n8n_services_yaml}
+  redis:
+    <<: *common
+    image: redis:7.4.0-alpine
+    container_name: redis
+    command: ["redis-server","--requirepass","${REDIS_PASSWORD}"]
+    networks: [ internal ]
 
-  n8n-db:
-    image: postgres:15
-    container_name: \${PROJECT_NAME}_n8n_db
-    restart: always
+  # Отдельный Postgres для n8n
+  postgres-n8n:
+    <<: *common
+    image: postgres:16.4-alpine
+    container_name: postgres-n8n
     environment:
-      - POSTGRES_USER=\${N8N_DB_USER}
-      - POSTGRES_PASSWORD=\${N8N_DB_PASSWORD}
-      - POSTGRES_DB=\${N8N_DB_NAME}
-    networks:
-      - main_net
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${N8N_DB_PASSWORD}
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     volumes:
-      -./volumes/postgres:/var/lib/postgresql/data
+      - ./volumes/postgres_n8n:/var/lib/postgresql/data
+    networks: [ internal ]
 
-networks:
-  main_net:
-    name: \${NETWORK_NAME}
-    external: true
+  # Инициализация роли/БД n8n в postgres-n8n
+  pg-init-n8n:
+    image: postgres:16.4-alpine
+    container_name: pg-init-n8n
+    depends_on: [ postgres-n8n ]
+    entrypoint: ["/bin/sh","-c"]
+    command:
+      - |
+        until pg_isready -h postgres-n8n -U postgres; do sleep 1; done
+        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+          "SELECT 'CREATE ROLE n8n LOGIN PASSWORD ''${N8N_DB_PASSWORD}'';' \
+           WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='n8n') \gexec"
+        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+          "SELECT 'CREATE DATABASE n8n OWNER n8n' \
+           WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname=''n8n'') \gexec"
+        psql -h postgres-n8n -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+          "GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;"
+    environment:
+      PGPASSWORD: ${N8N_DB_PASSWORD}
+    networks: [ internal ]
 
-volumes:
-  redis_data:
+  # n8n - main
+  n8n:
+    <<: *common
+    image: n8nio/n8n:latest
+    container_name: n8n
+    environment:
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=5678
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_SECURE_COOKIE=false
+      - N8N_PROTOCOL=http
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${N8N_DB_HOST}
+      - DB_POSTGRESDB_PORT=${N8N_DB_PORT}
+      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
+      - DB_POSTGRESDB_USER=${N8N_DB_USER}
+      - DB_POSTGRESDB_PASSWORD=${N8N_DB_PASSWORD}
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+    depends_on:
+      - redis
+      - pg-init-n8n
+    healthcheck:
+      test: ["CMD","wget","--spider","-q","http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
+      - "traefik.http.routers.n8n.entrypoints=web,websecure"
+      - "traefik.http.routers.n8n.tls.certresolver=myresolver"
+      - "traefik.http.routers.n8n.middlewares=mw-sec-headers@file,mw-ratelimit@file"
+    networks: [ web, internal ]
+
+  # n8n worker (используется только в FULL режиме — запуск кнопкой manage.sh при желании)
+  n8n-worker:
+    <<: *common
+    image: n8nio/n8n:latest
+    container_name: n8n-worker
+    environment:
+      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=${N8N_DB_HOST}
+      - DB_POSTGRESDB_PORT=${N8N_DB_PORT}
+      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
+      - DB_POSTGRESDB_USER=${N8N_DB_USER}
+      - DB_POSTGRESDB_PASSWORD=${N8N_DB_PASSWORD}
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+    depends_on: [ redis, pg-init-n8n ]
+    networks: [ internal ]
+
+  # Эти два сервиса НЕ создаются сами по себе — ниже только лейблы для Supabase (если он подключён в compose.supabase.yml)
+  kong:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.kong.rule=Host(`${API_HOST}`)"
+      - "traefik.http.routers.kong.entrypoints=web,websecure"
+      - "traefik.http.routers.kong.tls.certresolver=myresolver"
+      - "traefik.http.routers.kong.middlewares=mw-sec-headers@file,mw-ratelimit@file"
+
+  studio:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.studio.rule=Host(`${STUDIO_HOST}`)"
+      - "traefik.http.routers.studio.entrypoints=web,websecure"
+      - "traefik.http.routers.studio.tls.certresolver=myresolver"
+      - "traefik.http.routers.studio.middlewares=mw-sec-headers@file,mw-ratelimit@file"
 EOF
-    success "Docker Compose для проекта готов."
-}
 
-create_supabase_files() {
-    if]; then
-        info "Пропускаем установку Supabase (выбран вариант Lightweight)."
-        return
-    fi
+# ---------- Scripts: manage / backup / update ----------
+info "Создаём служебные скрипты..."
 
-    info "Готовим файлы для Supabase..."
-    mkdir -p "$SUPABASE_DIR"
-    
-    info "Загружаем docker-compose.yml для Supabase..."
-    if! curl -fsSL "https://raw.githubusercontent.com/supabase/supabase/master/docker/docker-compose.yml" -o "${SUPABASE_DIR}/docker-compose.yml"; then
-        error "Не удалось загрузить docker-compose.yml для Supabase. Проверьте интернет-соединение."
-    fi
-    success "docker-compose.yml для Supabase загружен."
+cat > "${PROJECT_DIR}/scripts/manage.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
-    info "Создаём.env для Supabase..."
-    cat <<EOF > "${SUPABASE_DIR}/.env"
-# Supabase Settings
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-JWT_SECRET=${SUPABASE_JWT_SECRET}
-ANON_KEY=${ANON_KEY}
-SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}
-DASHBOARD_USERNAME=supabase
-DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
-SUPABASE_PUBLIC_URL=https://${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}
+# Загружаем .env
+set -a
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|\#*) continue ;; *=*) key="${line%%=*}"; val="${line#*=}"
+    if [[ "$val" =~ ^\".*\"$ ]]; then val="${val:1:${#val}-2}"
+    elif [[ "$val" =~ ^\'.*\'$ ]]; then val="${val:1:${#val}-2}"; fi
+    printf -v "$key" '%s' "$val"; export "$key";;
+  esac
+done < .env
+set +a
+
+# Имя сети Traefik
+if grep -qE '^[[:space:]]*name:[[:space:]]*supabase\b' compose.supabase.yml 2>/dev/null; then
+  PROJECT_NAME="supabase"
+else
+  PROJECT_NAME="$(basename "$PWD")"
+fi
+export PROJECT_WEB_NET="${PROJECT_NAME}_web"
+
+MODE="${INSTALLATION_MODE:-standard}"
+
+compose_args=()
+case "$MODE" in
+  full|standard|rag)
+    compose_args=(-f compose.supabase.yml -f docker-compose.yml)
+    ;;
+  light)
+    compose_args=(-f docker-compose.yml)
+    ;;
+  *)
+    echo "Unknown mode: $MODE" >&2; exit 1;;
+esac
+
+case "${1:-up}" in
+  up) docker compose "${compose_args[@]}" up -d ;;
+  down) docker compose "${compose_args[@]}" down ;;
+  ps) docker compose "${compose_args[@]}" ps ;;
+  logs) shift || true
+        if [ $# -gt 0 ]; then docker compose "${compose_args[@]}" logs -f --tail=200 "$@"
+        else docker compose "${compose_args[@]}" logs -f --tail=200; fi ;;
+  restart) docker compose "${compose_args[@]}" restart ;;
+  pull) docker compose "${compose_args[@]}" pull ;;
+  *) echo "Usage: $0 {up|down|ps|logs|restart|pull}" ;;
+esac
 EOF
-    success ".env для Supabase создан."
+chmod +x "${PROJECT_DIR}/scripts/manage.sh"
 
-    info "Модифицируем docker-compose.yml для Supabase..."
-    # Add external network definition at the end of the file
-    echo -e "\nnetworks:\n  main_net:\n    name: ${PROJECT_NAME}_main_net\n    external: true" >> "${SUPABASE_DIR}/docker-compose.yml"
-    
-    # Add network and labels to kong service
-    sed -i -e "/^  kong:/a \    labels:\n      - \"traefik.enable=true\"\n      - \"traefik.http.routers.supabase-kong.rule=Host(`${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}`)\"\n      - \"traefik.http.routers.supabase-kong.entrypoints=websecure\"\n      - \"traefik.http.routers.supabase-kong.tls.certresolver=letsencrypt\"\n      - \"traefik.http.services.supabase-kong.loadbalancer.server.port=8000\"\n    networks:\n      - default\n      - main_net" "${SUPABASE_DIR}/docker-compose.yml"
+cat > "${PROJECT_DIR}/scripts/backup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
-    if]; then
-        info "Оптимизируем Supabase для RAG..."
-        awk '
-            /^  (storage|functions|realtime|analytics|imgproxy):/ { comment=1 }
-            /^  \w/ &&!/  (storage|functions|realtime|analytics|imgproxy):/ { comment=0 }
-            /^(volumes|networks):/ { comment=0 }
-            {
-                if (comment) {
-                    print "#" $0
-                } else {
-                    print $0
-                }
-            }
-        ' "${SUPABASE_DIR}/docker-compose.yml" > "${SUPABASE_DIR}/docker-compose.tmp" && mv "${SUPABASE_DIR}/docker-compose.tmp" "${SUPABASE_DIR}/docker-compose.yml"
-        success "Supabase оптимизирован."
-    fi
-    
-    success "Модификация docker-compose.yml для Supabase завершена."
+set -a
+while IFS= read -r line; do
+  case "$line" in ''|\#*) continue ;; *=*) export "$line" ;; esac
+done < .env
+set +a
+
+TS=$(date +%Y%m%d_%H%M%S)
+mkdir -p backups
+
+# Бэкапим БД n8n (отдельный Postgres)
+DB_CONT="postgres-n8n"
+echo "Dumping n8n database from ${DB_CONT}..."
+docker exec -e PGPASSWORD="${N8N_DB_PASSWORD}" "${DB_CONT}" pg_dump -U postgres -d "${N8N_DB_NAME}" -Fc -f "/tmp/n8n_${TS}.dump" || {
+  echo "n8n DB may not exist yet; trying postgres..." >&2
+  docker exec -e PGPASSWORD="${N8N_DB_PASSWORD}" "${DB_CONT}" pg_dump -U postgres -d postgres -Fc -f "/tmp/n8n_${TS}.dump"
 }
+docker cp "${DB_CONT}:/tmp/n8n_${TS}.dump" "backups/n8n_${TS}.dump"
+docker exec "${DB_CONT}" rm -f "/tmp/n8n_${TS}.dump"
 
-# --- Основная логика скрипта ---
-main() {
-    clear
-    echo -e "${C_WHITE_BOLD}"
-    echo "================================================================="
-    echo "|| Welcome to the MEDIA WORKS Stack Installer ||"
-    echo "================================================================="
-    echo -e "${C_RESET}"
+# Если есть Supabase — бэкапим и его
+if docker ps --format '{{.Names}}' | grep -q '^supabase-db$'; then
+  echo "Dumping supabase database from supabase-db..."
+  docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db pg_dump -U postgres -d "${POSTGRES_DB}" -Fc -f "/tmp/supabase_${TS}.dump"
+  docker cp "supabase-db:/tmp/supabase_${TS}.dump" "backups/supabase_${TS}.dump"
+  docker exec "supabase-db" rm -f "/tmp/supabase_${TS}.dump"
+fi
 
-    info "Проверка системных зависимостей..."
-    for cmd in curl git sudo awk; do
-        if! command -v $cmd &> /dev/null; then
-            error "Команда '$cmd' не найдена. Пожалуйста, установите ее и запустите скрипт снова."
-        fi
-    done
-    success "Все зависимости на месте."
+echo "Backups saved in ./backups/"
+EOF
+chmod +x "${PROJECT_DIR}/scripts/backup.sh"
 
-    if [ "$(id -u)" -ne 0 ]; then
-        error "Этот скрипт должен быть запущен с правами root или через sudo."
-    fi
+cat > "${PROJECT_DIR}/scripts/update.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+./scripts/manage.sh pull
+./scripts/manage.sh up
+sleep 3
+EOF
+chmod +x "${PROJECT_DIR}/scripts/update.sh"
 
-    if! grep -q -E 'Debian|Ubuntu' /etc/os-release; then
-        warn "Этот скрипт оптимизирован для Debian и Ubuntu. На других системах возможны проблемы."
-    fi
+info "Важно: для управления стеком используйте:"
+echo "  ${PROJECT_DIR}/scripts/manage.sh (он подставляет нужные compose-файлы)."
 
-    info "Пожалуйста, введите параметры для вашего проекта."
-    while true; do
-        read -rp "$(echo -e "${C_YELLOW}Введите название проекта (только латинские буквы, без пробелов, например 'myproject'): ${C_RESET}")" PROJECT_NAME
-        if+$ ]]; then
-            break
-        else
-            warn "Неверный формат. Используйте только латинские буквы."
-        fi
-    done
-    
-    read -rp "$(echo -e "${C_YELLOW}Введите основной домен (например, 'example.com'): ${C_RESET}")" MAIN_DOMAIN
-    if]; then
-        error "Основной домен является обязательным параметром."
-    fi
+# ---------- Credentials file ----------
+info "Записываем credentials..."
+cat > "${PROJECT_DIR}/credentials.txt" <<EOF
+==== MEDIA WORKS — Credentials (${PROJECT_NAME}) ====
 
-    read -rp "$(echo -e "${C_YELLOW}Введите поддомен для n8n [default: n8n]: ${C_RESET}")" N8N_SUBDOMAIN
-    N8N_SUBDOMAIN=${N8N_SUBDOMAIN:-n8n}
+Mode: ${INSTALLATION_MODE}
 
-    read -rp "$(echo -e "${C_YELLOW}Введите поддомен для Supabase Studio [default: supabase]: ${C_RESET}")" SUPABASE_SUBDOMAIN
-    SUPABASE_SUBDOMAIN=${SUPABASE_SUBDOMAIN:-supabase}
+Domains:
+  n8n:     https://${N8N_HOST}
+  studio:  https://${STUDIO_HOST}
+  api:     https://${API_HOST}
 
-    read -rp "$(echo -e "${C_YELLOW}Введите ваш email для сертификатов Let's Encrypt: ${C_RESET}")" LETSENCRYPT_EMAIL
-    if]; then
-        error "Email является обязательным параметром для Let's Encrypt."
-    fi
+Supabase:
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  JWT_SECRET: ${JWT_SECRET}
+  ANON_KEY: ${ANON_KEY}
+  SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+  Studio Dashboard: ${DASHBOARD_USERNAME} / ${DASHBOARD_PASSWORD}
 
-    echo -e "${C_WHITE_BOLD}Выберите вариант установки:${C_RESET}"
-    echo "  1) МАКСИМАЛЬНЫЙ (Full Stack: Supabase, Traefik, N8N Main+Worker, Redis, PG for N8N)"
-    echo "  2) СТАНДАРТНЫЙ (Standard: Supabase, Traefik, N8N single, PG for N8N)"
-    echo "  3) RAG-ОПТИМИЗИРОВАННЫЙ (RAG: Supabase RAG-only, Traefik, N8N, PG for N8N)"
-    echo "  4) МИНИМАЛЬНЫЙ (Lightweight: Traefik, N8N, PG for N8N, без Supabase)"
-    read -rp "$(echo -e "${C_YELLOW}Ваш выбор [1-4]: ${C_RESET}")" INSTALL_CHOICE
+n8n Postgres (отдельный):
+  HOST: postgres-n8n
+  PORT: 5432
+  DB:   n8n
+  USER: n8n
+  PASS: ${N8N_PG_PASSWORD}
 
-    read -rp "$(echo -e "${C_YELLOW}Требуется ли настройка SMTP? [y/N]: ${C_RESET}")" SMTP_CHOICE
-    SMTP_CHOICE=${SMTP_CHOICE:-N}
+Redis:
+  PASSWORD: ${REDIS_PASSWORD}
 
-    if$ ]]; then
-        read -rp "SMTP Host: " SMTP_HOST
-        read -rp "SMTP Port: " SMTP_PORT
-        read -rp "SMTP User: " SMTP_USER
-        read -sp "SMTP Password: " SMTP_PASS
-        echo
-        SMTP_PASS_ESCAPED=${SMTP_PASS//\$/\$\$}
-        read -rp "SMTP Sender Name: " SMTP_SENDER_NAME
-        read -rp "SMTP Admin Email: " SMTP_ADMIN_EMAIL
-    fi
+ACME email: ${ACME_EMAIL}
 
-    info "Проверка и установка Docker..."
-    if! command -v docker &> /dev/null; then
-        info "Docker не найден. Запускаю установку..."
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh
-        rm get-docker.sh
-        success "Docker и Docker Compose успешно установлены."
-    else
-        success "Docker уже установлен."
-    fi
+SMTP:
+  ENABLED: $([[ "${WANT_SMTP}" =~ ^[Yy]$ ]] && echo yes || echo no)
+  HOST: ${SMTP_HOST}
+  PORT: ${SMTP_PORT}
+  USER: ${SMTP_USER}
+  PASS: ${SMTP_PASS}
+  SENDER_NAME: ${SMTP_SENDER_NAME}
+  ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL}
+EOF
+chmod 600 "${PROJECT_DIR}/credentials.txt"
 
-    info "Генерация секретов и создание каталогов..."
-    PROJECT_DIR="/root/${PROJECT_NAME}"
-    SUPABASE_DIR="/root/supabase"
-    mkdir -p "${PROJECT_DIR}/configs/traefik"
-    mkdir -p "${PROJECT_DIR}/n8n-data"
-    mkdir -p "${PROJECT_DIR}/volumes/postgres"
-    
-    POSTGRES_PASSWORD=$(generate_password)
-    N8N_DB_PASSWORD=$(generate_password)
-    SUPABASE_JWT_SECRET=$(generate_password)
-    DASHBOARD_PASSWORD=$(generate_password)
-    ANON_KEY=$(generate_jwt_token "$SUPABASE_JWT_SECRET" "anon")
-    SERVICE_ROLE_KEY=$(generate_jwt_token "$SUPABASE_JWT_SECRET" "service_role")
-    success "Секреты сгенерированы."
+# ---------- Start stack ----------
+info "Запускаем стек по зависимостям..."
+pushd "${PROJECT_DIR}" >/dev/null
 
-    info "Создание конфигурационных файлов..."
-    create_project_files
-    create_supabase_files
-    success "Конфигурационные файлы успешно созданы."
+if [ "$INSTALLATION_MODE" = "light" ]; then
+  ./scripts/manage.sh up
+  wait_for_postgres postgres-n8n || err "PostgreSQL (n8n) не поднялся."
+else
+  # Сначала supabase core (vector + db), затем весь стек
+  docker compose -f compose.supabase.yml up -d vector || true
+  docker compose -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
+  wait_for_postgres supabase-db || err "Supabase DB не поднялся."
+  ./scripts/manage.sh up
+  wait_for_postgres postgres-n8n || err "PostgreSQL (n8n) не поднялся."
+fi
 
-    info "Очистка и валидация.env файлов..."
-    if]; then
-        sed -i -e 's/[[:space:]]*$//' -e 's/\r$//' "${SUPABASE_DIR}/.env"
-        grep -Eq '^[A-Z_]+=' "${SUPABASE_DIR}/.env" |
+# ---------- Health checks ----------
+info "Выполняем health-check’и..."
+health_check_all_services
 
-| warn "Обнаружен неверный формат в.env файле Supabase."
-    fi
-    sed -i -e 's/[[:space:]]*$//' -e 's/\r$//' "${PROJECT_DIR}/.env"
-    grep -Eq '^[A-Z_]+=' "${PROJECT_DIR}/.env" |
+popd >/dev/null
 
-| warn "Обнаружен неверный формат в.env файле проекта."
-    success "Файлы.env очищены."
-
-    info "Подготовка сетевой инфраструктуры и хранилища сертификатов..."
-    docker network create "${PROJECT_NAME}_main_net" |
-
-| warn "Сеть ${PROJECT_NAME}_main_net уже существует."
-    touch "${PROJECT_DIR}/configs/traefik/acme.json"
-    chmod 600 "${PROJECT_DIR}/configs/traefik/acme.json"
-    success "Сетевая инфраструктура готова."
-
-    if]; then
-        info "Запуск изолированного стека Supabase..."
-        (cd "$SUPABASE_DIR" && docker compose up -d)
-        success "Стек Supabase запущен."
-    fi
-
-    info "Запуск проектного стека (${PROJECT_NAME})..."
-    (cd "$PROJECT_DIR" && docker compose up -d)
-    success "Проектный стек запущен. Ожидание стабилизации сервисов (30 секунд)..."
-    sleep 30
-
-    info "Выполнение проверок работоспособности (Health Checks)..."
-    N8N_URL="https://${N8N_SUBDOMAIN}.${MAIN_DOMAIN}"
-    if n8n_status=$(curl -s -o /dev/null -w "%{http_code}" "$N8N_URL"); then
-        if [ "$n8n_status" -eq 200 ]; then
-            success "n8n UI доступен по адресу ${N8N_URL} (статус: ${n8n_status})"
-        else
-            warn "n8n UI ответил со статусом ${n8n_status}. Возможны проблемы с запуском или SSL."
-        fi
-    else
-        warn "Не удалось выполнить запрос к n8n UI по адресу ${N8N_URL}."
-    fi
-
-    if]; then
-        SUPABASE_URL="https://${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}"
-        if supabase_status=$(curl -s -o /dev/null -w "%{http_code}" "$SUPABASE_URL"); then
-            if [ "$supabase_status" -eq 200 ]; then
-                success "Supabase Studio доступен по адресу ${SUPABASE_URL} (статус: ${supabase_status})"
-            else
-                warn "Supabase Studio ответил со статусом ${supabase_status}. Возможны проблемы с запуском или SSL."
-            fi
-        else
-            warn "Не удалось выполнить запрос к Supabase Studio по адресу ${SUPABASE_URL}."
-        fi
-    fi
-
-    info "Генерация файла с учетными данными..."
-    CREDENTIALS_FILE="/root/post-install-credentials.txt"
-    {
-        echo "================================================="
-        echo "MEDIA WORKS - Данные по установке проекта: ${PROJECT_NAME}"
-        echo "================================================="
-        echo ""
-        echo "Дата установки: $(date)"
-        echo ""
-        echo "--- URL Адреса ---"
-        echo "n8n UI: https://${N8N_SUBDOMAIN}.${MAIN_DOMAIN}"
-        if]; then
-            echo "Supabase Studio: https://${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}"
-            echo "Supabase API Endpoint: https://${SUPABASE_SUBDOMAIN}.${MAIN_DOMAIN}"
-        fi
-        echo ""
-        echo "--- Доступы к n8n ---"
-        echo "Postgres (внутри Docker): postgresql://n8n:${N8N_DB_PASSWORD}@n8n-db:5432/n8n"
-        echo ""
-        if]; then
-            echo "--- Доступы к Supabase ---"
-            echo "Studio Username: supabase"
-            echo "Studio Password: ${DASHBOARD_PASSWORD}"
-            echo "Postgres (внутри Docker): postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres"
-            echo ""
-            echo "--- Supabase API Ключи ---"
-            echo "ANON_KEY: ${ANON_KEY}"
-            echo "SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}"
-            echo "JWT_SECRET: ${SUPABASE_JWT_SECRET}"
-        fi
-    } > "$CREDENTIALS_FILE"
-    success "Файл с учетными данными сохранен в ${CREDENTIALS_FILE}"
-
-    echo -e "${C_WHITE_BOLD}"
-    echo "================================================================="
-    echo "|| Установка завершена! ||"
-    echo "================================================================="
-    echo -e "${C_RESET}"
-    echo "Все доступы и пароли сохранены в файле: ${CREDENTIALS_FILE}"
-    echo "Спасибо за использование установщика от MEDIA WORKS!"
-}
-
-# --- Запуск основной функции ---
-main
+# ---------- FOOTER ----------
+echo
+echo "==============================================="
+echo -e "✅ ${GREEN}Установка завершена успешно!${NC}"
+echo "🚀 MEDIA WORKS — отдельные Postgres для Supabase и n8n"
+echo "==============================================="
+echo
+echo "Файлы проекта: ${PROJECT_DIR}"
+echo "Управление:    ${PROJECT_DIR}/scripts/manage.sh {up|down|ps|logs|restart|pull}"
+echo "Backup:        ${PROJECT_DIR}/scripts/backup.sh"
+echo "Update:        ${PROJECT_DIR}/scripts/update.sh"
+echo
+echo "Доступы и ключи: ${PROJECT_DIR}/credentials.txt  (права 600)"
+echo
+echo "Важно:"
+echo " - Проверьте DNS записи для доменов:"
+echo "     ${N8N_HOST}, ${STUDIO_HOST}, ${API_HOST}"
+echo " - Откройте порты 80/443."
+echo " - Первичная авторизация в Supabase Studio: ${DASHBOARD_USERNAME} / ${DASHBOARD_PASSWORD}"
+echo " - n8n доступен по: https://${N8N_HOST}"
