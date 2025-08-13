@@ -361,8 +361,6 @@ fi
 
 # override: Traefik + n8n + лейблы для проксирования supabase (kong/studio)
 cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
-version: "3.8"
-
 x-common: &common
   restart: unless-stopped
   logging:
@@ -490,7 +488,6 @@ EOF
 if [ "$INSTALLATION_MODE" = "light" ]; then
   info "Режим LIGHT — создаём compose для Postgres (для n8n)."
   cat > "${PROJECT_DIR}/compose.light.yml" <<'EOF'
-version: "3.8"
 services:
   postgres:
     image: postgres:15-alpine
@@ -542,7 +539,6 @@ fi
 if [ "$INSTALLATION_MODE" = "rag" ]; then
   info "Режим RAG — создаём урезанный compose Supabase."
   cat > "${PROJECT_DIR}/compose.supabase.rag.yml" <<'EOF'
-version: '3.8'
 x-common: &common
   restart: unless-stopped
   logging:
