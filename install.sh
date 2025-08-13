@@ -113,9 +113,10 @@ retry_operation() {
 }
 
 gen_alnum() { # length
-  tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-32}"
+  local len="${1:-32}"
+  # избегаем SIGPIPE при pipefail: запускаем генерацию в подсhell без pipefail
+  ( set +o pipefail; tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len" ) || true
 }
-
 b64url() { # stdin -> base64url (no padding)
   openssl base64 -A | tr '+/' '-_' | tr -d '='
 }
