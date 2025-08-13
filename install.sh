@@ -262,7 +262,86 @@ ok "Секреты сгенерированы."
 
 # ---------- Build .env (STRICT KEY=VALUE) ----------
 info "Готовим .env..."
-cp /root/supabase/docker/.env.example "${PROJECT_DIR}/.env" || true
+# ЧИСТЫЙ .env без наследования из .env.example
+cat > "${PROJECT_DIR}/.env" <<EOF
+# --- MEDIA WORKS generated .env (${PROJECT_NAME}) ---
+
+# Mode / domains
+INSTALLATION_MODE=${INSTALLATION_MODE}
+ROOT_DOMAIN=${ROOT_DOMAIN}
+N8N_HOST=${N8N_HOST}
+STUDIO_HOST=${STUDIO_HOST}
+API_HOST=${API_HOST}
+ACME_EMAIL=${ACME_EMAIL}
+
+# Supabase core
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+POSTGRES_DB=postgres
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+PGRST_DB_SCHEMAS=public
+
+JWT_SECRET=${JWT_SECRET}
+ANON_KEY=${ANON_KEY}
+SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}
+JWT_EXPIRY=630720000
+
+DASHBOARD_USERNAME=${DASHBOARD_USERNAME}
+DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
+
+SUPABASE_PUBLIC_URL=https://${API_HOST}
+SITE_URL=https://${STUDIO_HOST}
+API_EXTERNAL_URL=https://${API_HOST}
+
+KONG_HTTP_PORT=8000
+KONG_HTTPS_PORT=8443
+IMGPROXY_ENABLE_WEBP_DETECTION=true
+
+# Vector / Docker socket
+DOCKER_SOCKET_LOCATION=/var/run/docker.sock
+
+# Studio defaults (кавычки из-за пробелов)
+STUDIO_DEFAULT_ORGANIZATION="MEDIA WORKS"
+STUDIO_DEFAULT_PROJECT=${PROJECT_NAME}
+
+# n8n / Redis
+N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+REDIS_PASSWORD=${REDIS_PASSWORD}
+
+# n8n DB
+N8N_DB_HOST=${N8N_DB_HOST}
+N8N_DB_PASSWORD=${N8N_DB_PASSWORD}
+
+# Auth toggles (SMTP блок ниже при необходимости)
+ENABLE_EMAIL_SIGNUP=false
+ENABLE_ANONYMOUS_USERS=true
+ENABLE_EMAIL_AUTOCONFIRM=false
+ENABLE_PHONE_SIGNUP=false
+ENABLE_PHONE_AUTOCONFIRM=false
+EOF
+
+# SMTP блок при выборе (добавляем поверх)
+if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
+  cat >> "${PROJECT_DIR}/.env" <<EOF
+SMTP_HOST=${SMTP_HOST}
+SMTP_PORT=${SMTP_PORT}
+SMTP_USER=${SMTP_USER}
+SMTP_PASS=${SMTP_PASS}
+SMTP_SENDER_NAME=${SMTP_SENDER_NAME}
+SMTP_ADMIN_EMAIL=${SMTP_ADMIN_EMAIL}
+ENABLE_EMAIL_SIGNUP=true
+ENABLE_ANONYMOUS_USERS=false
+ENABLE_EMAIL_AUTOCONFIRM=true
+ENABLE_PHONE_SIGNUP=false
+ENABLE_PHONE_AUTOCONFIRM=false
+EOF
+fi
+
+# Очистка .env и валидация
+sed -i 's/[[:space:]]*$//' "${PROJECT_DIR}/.env"
+sed -i 's/\r$//' "${PROJECT_DIR}/.env"
+grep -E '^[A-Z0-9_]+=' "${PROJECT_DIR}/.env" >/dev/null || err "Invalid .env format (нет KEY=VALUE)."
+
 
 # Базовые безопасные значения (строго KEY=VALUE, без двоеточий):
 {
@@ -863,19 +942,36 @@ cat > "${PROJECT_DIR}/scripts/manage.sh" <<'EOF'
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Безопасная загрузка только строк KEY=VALUE
+# === УСТОЙЧИВАЯ ЗАГРУЗКА .env (поддерживает пробелы/кавычки в значениях) ===
 set -a
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
-    ''|\#*) continue ;;
-    *=*) export "$line" ;;
+    ''|\#*) continue ;;                # пустые строки и комментарии
+    *=*)
+      key="${line%%=*}"
+      val="${line#*=}"
+      # убираем внешние кавычки, если есть
+      if [[ "$val" =~ ^\".*\"$ ]]; then
+        val="${val:1:${#val}-2}"
+      elif [[ "$val" =~ ^\'.*\'$ ]]; then
+        val="${val:1:${#val}-2}"
+      fi
+      printf -v "$key" '%s' "$val"
+      export "$key"
+      ;;
+    *) ;;                              # игнор прочего
   esac
 done < .env
 set +a
 
-PROJECT_BASENAME="$(basename "$PWD")"
-PROJECT_WEB_NET="${PROJECT_BASENAME}_web"
-export PROJECT_WEB_NET
+# === ОПРЕДЕЛЕНИЕ РЕАЛЬНОГО ИМЕНИ ПРОЕКТА ДЛЯ СЕТИ TRAEFIK ===
+# Если в compose.supabase.yml задано name: supabase, используем его; иначе — имя папки.
+if grep -qE '^[[:space:]]*name:[[:space:]]*supabase\b' compose.supabase.yml 2>/dev/null; then
+  PROJECT_NAME="supabase"
+else
+  PROJECT_NAME="$(basename "$PWD")"
+fi
+export PROJECT_WEB_NET="${PROJECT_NAME}_web"
 
 MODE="${INSTALLATION_MODE:-standard}"
 
@@ -895,16 +991,35 @@ case "$MODE" in
 esac
 
 case "${1:-up}" in
-  up)       docker compose "${compose_args[@]}" up -d ;;
-  down)     docker compose "${compose_args[@]}" down ;;
-  ps)       docker compose "${compose_args[@]}" ps ;;
-  logs)     shift || true; docker compose "${compose_args[@]}" logs -f "${@:-}" ;;
-  restart)  docker compose "${compose_args[@]}" restart ;;
-  pull)     docker compose "${compose_args[@]}" pull ;;
+  up)
+    docker compose "${compose_args[@]}" up -d
+    ;;
+  down)
+    docker compose "${compose_args[@]}" down
+    ;;
+  ps)
+    docker compose "${compose_args[@]}" ps
+    ;;
+  logs)
+    shift || true
+    if [ $# -gt 0 ]; then
+      docker compose "${compose_args[@]}" logs -f --tail=200 "$@"
+    else
+      docker compose "${compose_args[@]}" logs -f --tail=200
+    fi
+    ;;
+  restart)
+    docker compose "${compose_args[@]}" restart
+    ;;
+  pull)
+    docker compose "${compose_args[@]}" pull
+    ;;
   *)
     echo "Usage: $0 {up|down|ps|logs|restart|pull}" ;;
 esac
 EOF
+chmod +x "${PROJECT_DIR}/scripts/manage.sh"
+
 chmod +x "${PROJECT_DIR}/scripts/manage.sh"
 
 cat > "${PROJECT_DIR}/scripts/backup.sh" <<'EOF'
