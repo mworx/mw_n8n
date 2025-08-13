@@ -887,3 +887,5 @@ process_supabase_compose_rag() {
     
     log_success "Supabase compose обработан для режима RAG"
 }
+
+main "$@"
