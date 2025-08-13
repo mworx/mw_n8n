@@ -260,6 +260,14 @@ ANON_KEY="$(jwt_hs256 "$JWT_SECRET" "$ANON_PAYLOAD")"
 SERVICE_ROLE_KEY="$(jwt_hs256 "$JWT_SECRET" "$SERVICE_PAYLOAD")"
 ok "Секреты сгенерированы."
 
+# n8n DB host/password должны быть определены ДО сборки .env (из-за set -u)
+if [ "$INSTALLATION_MODE" = "light" ]; then
+  N8N_DB_HOST="postgres"
+else
+  N8N_DB_HOST="supabase-db"
+fi
+N8N_DB_PASSWORD="$(gen_alnum 24)"
+
 # ---------- Build .env (STRICT KEY=VALUE) ----------
 info "Готовим .env..."
 # ЧИСТЫЙ .env без наследования из .env.example
@@ -337,79 +345,6 @@ ENABLE_PHONE_AUTOCONFIRM=false
 EOF
 fi
 
-# Очистка .env и валидация
-sed -i 's/[[:space:]]*$//' "${PROJECT_DIR}/.env"
-sed -i 's/\r$//' "${PROJECT_DIR}/.env"
-grep -E '^[A-Z0-9_]+=' "${PROJECT_DIR}/.env" >/dev/null || err "Invalid .env format (нет KEY=VALUE)."
-
-
-# Базовые безопасные значения (строго KEY=VALUE, без двоеточий):
-{
-  echo "INSTALLATION_MODE=${INSTALLATION_MODE}"
-  echo "ROOT_DOMAIN=${ROOT_DOMAIN}"
-  echo "N8N_HOST=${N8N_HOST}"
-  echo "STUDIO_HOST=${STUDIO_HOST}"
-  echo "API_HOST=${API_HOST}"
-  echo "ACME_EMAIL=${ACME_EMAIL}"
-
-  echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
-  echo "POSTGRES_DB=postgres"
-  echo "POSTGRES_HOST=db"
-  echo "POSTGRES_PORT=5432"
-  echo "PGRST_DB_SCHEMAS=public"
-
-  echo "JWT_SECRET=${JWT_SECRET}"
-  echo "ANON_KEY=${ANON_KEY}"
-  echo "SERVICE_ROLE_KEY=${SERVICE_ROLE_KEY}"
-  echo "JWT_EXPIRY=630720000"   # ~20 лет в секундах
-
-  echo "DASHBOARD_USERNAME=${DASHBOARD_USERNAME}"
-  echo "DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}"
-
-  echo "SUPABASE_PUBLIC_URL=https://${API_HOST}"
-  echo "SITE_URL=https://${STUDIO_HOST}"
-  echo "API_EXTERNAL_URL=https://${API_HOST}"
-
-  echo "KONG_HTTP_PORT=8000"
-  echo "KONG_HTTPS_PORT=8443"
-
-  echo "IMGPROXY_ENABLE_WEBP_DETECTION=true"
-
-  echo "DOCKER_SOCKET_LOCATION=/var/run/docker.sock"
-
-  # Studio defaults (с кавычками из-за пробелов)
-  echo 'STUDIO_DEFAULT_ORGANIZATION="MEDIA WORKS"'
-  echo "STUDIO_DEFAULT_PROJECT=${PROJECT_NAME}"
-
-  # n8n DB
-  echo "N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}"
-  echo "REDIS_PASSWORD=${REDIS_PASSWORD}"
-} >> "${PROJECT_DIR}/.env"
-
-# SMTP блок
-if [[ "$WANT_SMTP" =~ ^[Yy]$ ]]; then
-  {
-    echo "SMTP_HOST=${SMTP_HOST}"
-    echo "SMTP_PORT=${SMTP_PORT}"
-    echo "SMTP_USER=${SMTP_USER}"
-    echo "SMTP_PASS=${SMTP_PASS}"
-    echo "SMTP_SENDER_NAME=${SMTP_SENDER_NAME}"
-    echo "SMTP_ADMIN_EMAIL=${SMTP_ADMIN_EMAIL}"
-    echo "ENABLE_EMAIL_SIGNUP=true"
-    echo "ENABLE_ANONYMOUS_USERS=false"
-    echo "ENABLE_EMAIL_AUTOCONFIRM=true"
-    echo "ENABLE_PHONE_SIGNUP=false"
-    echo "ENABLE_PHONE_AUTOCONFIRM=false"
-  } >> "${PROJECT_DIR}/.env"
-else
-  {
-    echo "ENABLE_EMAIL_SIGNUP=false"
-    echo "ENABLE_ANONYMOUS_USERS=true"
-    echo "ENABLE_EMAIL_AUTOCONFIRM=false"
-    echo "ENABLE_PHONE_SIGNUP=false"
-    echo "ENABLE_PHONE_AUTOCONFIRM=false"
-  } >> "${PROJECT_DIR}/.env"
-fi
 
 # Очистка .env и валидация
 sed -i 's/[[:space:]]*$//' "${PROJECT_DIR}/.env"
@@ -492,16 +427,19 @@ if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ]; t
   cp -rT /root/supabase/docker/volumes/logs   "${PROJECT_DIR}/volumes/logs"
   cp -rT /root/supabase/docker/volumes/db     "${PROJECT_DIR}/volumes/db"
   cp -rT /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/pooler"
+  # Для Kong нужен файл ./volumes/api/kong.yml
+  mkdir -p "${PROJECT_DIR}/volumes/api"
+  cp -rT /root/supabase/docker/volumes/api "${PROJECT_DIR}/volumes/api"  
 fi
 
 # Патчим vector: монтируем директорию, а не файл (исправляет "not a directory")
-sed -i 's#- \./volumes/logs/vector\.yml:/etc/vector/vector\.yml:ro,z#- ./volumes/logs:/etc/vector:ro,z#' "${PROJECT_DIR}/compose.supabase.yml"
+if [ -f "${PROJECT_DIR}/compose.supabase.yml" ]; then
+  sed -i 's#- \./volumes/logs/vector\.yml:/etc/vector/vector\.yml:ro,z#- ./volumes/logs:/etc/vector:ro,z#' "${PROJECT_DIR}/compose.supabase.yml"
+fi
 
 
 # 2) Наш override: Traefik + n8n + Traefik labels для kong/studio
 cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
-version: "3.8"
-
 x-common: &common
   restart: unless-stopped
   logging:
@@ -635,7 +573,6 @@ EOF
 # LIGHT compose
 if [ "$INSTALLATION_MODE" = "light" ]; then
   cat > "${PROJECT_DIR}/compose.light.yml" <<'EOF'
-version: "3.8"
 networks: { internal: {} }
 services:
   postgres:
@@ -922,17 +859,6 @@ plugins:
       preflight_continue: false
 EOF
 
-# ---------- n8n DB host / password ----------
-if [ "$INSTALLATION_MODE" = "light" ]; then
-  N8N_DB_HOST="postgres"
-else
-  N8N_DB_HOST="supabase-db"
-fi
-N8N_DB_PASSWORD="$(gen_alnum 24)"
-{
-  echo "N8N_DB_HOST=${N8N_DB_HOST}"
-  echo "N8N_DB_PASSWORD=${N8N_DB_PASSWORD}"
-} >> "${PROJECT_DIR}/.env"
 
 # ---------- Scripts: manage / backup / update ----------
 info "Создаём служебные скрипты..."
@@ -1018,8 +944,6 @@ case "${1:-up}" in
     echo "Usage: $0 {up|down|ps|logs|restart|pull}" ;;
 esac
 EOF
-chmod +x "${PROJECT_DIR}/scripts/manage.sh"
-
 chmod +x "${PROJECT_DIR}/scripts/manage.sh"
 
 cat > "${PROJECT_DIR}/scripts/backup.sh" <<'EOF'
@@ -1121,6 +1045,26 @@ else
   docker compose -f compose.supabase.yml up -d vector || true
   docker compose -f compose.supabase.yml up -d db || err "Не удалось запустить supabase-db"
   wait_for_postgres supabase-db || err "Supabase DB не поднялся."
+
+    # Инициализация пользователя/БД для n8n в Supabase
+    info "Инициализируем пользователя и БД n8n в Supabase..."
+    docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" supabase-db \
+      psql -U postgres -d "${POSTGRES_DB:-postgres}" -v ON_ERROR_STOP=1 <<'SQL' || err "Не удалось инициализировать БД n8n"
+  DO $$
+  BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n') THEN
+      CREATE ROLE n8n LOGIN PASSWORD '${N8N_DB_PASSWORD}';
+    ELSE
+      EXECUTE format('ALTER ROLE n8n LOGIN PASSWORD %L', '${N8N_DB_PASSWORD}');
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'n8n') THEN
+      CREATE DATABASE n8n OWNER n8n;
+    END IF;
+  END$$;
+  GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
+  SQL
+
+
   # Затем весь стек
   ./scripts/manage.sh up
 fi
