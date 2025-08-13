@@ -363,6 +363,10 @@ if [ "$INSTALLATION_MODE" = "full" ] || [ "$INSTALLATION_MODE" = "standard" ]; t
   cp -rT /root/supabase/docker/volumes/pooler "${PROJECT_DIR}/volumes/pooler"
 fi
 
+# Патчим vector: монтируем директорию, а не файл (исправляет "not a directory")
+sed -i 's#- \./volumes/logs/vector\.yml:/etc/vector/vector\.yml:ro,z#- ./volumes/logs:/etc/vector:ro,z#' "${PROJECT_DIR}/compose.supabase.yml"
+
+
 # 2) Наш override: Traefik + n8n + Traefik labels для kong/studio
 cat > "${PROJECT_DIR}/docker-compose.yml" <<'EOF'
 version: "3.8"
@@ -554,7 +558,7 @@ services:
     image: timberio/vector:0.28.1-alpine
     container_name: supabase-vector
     volumes:
-      - ./volumes/logs/vector.yml:/etc/vector/vector.yml:ro,z
+      - ./volumes/logs:/etc/vector:ro,z
       - ${DOCKER_SOCKET_LOCATION}:/var/run/docker.sock:ro,z
     healthcheck:
       test: ["CMD","wget","--no-verbose","--tries=1","--spider","http://vector:9001/health"]
