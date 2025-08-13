@@ -1,3 +1,5 @@
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -133,7 +135,7 @@ echo
 info "Введите параметры установки (обязательные помечены *):"
 read -rp " * Имя проекта (каталог в /root): " PROJECT_NAME_RAW
 [ -n "${PROJECT_NAME_RAW:-}" ] || err "Имя проекта обязательно."
-PROJECT_NAME="$(sanitize_name "$PROJECT_NAME_RAW")"
+PROJECT_NAME=$(echo "$PROJECT_NAME" | tr -cd 'a-zA-Z0-9-' | tr '[:upper:]' '[:lower:]')
 [ -n "$PROJECT_NAME" ] || err "Некорректное имя проекта."
 [ "$PROJECT_NAME" = "$PROJECT_NAME_RAW" ] || warn "Имя проекта нормализовано: '${PROJECT_NAME_RAW}' → '${PROJECT_NAME}'"
 PROJECT_DIR="/root/${PROJECT_NAME}"
