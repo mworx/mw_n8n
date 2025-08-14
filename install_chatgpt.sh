@@ -44,13 +44,12 @@ check_os() {
 
 check_ports() {
   local conflicts=""
-  command -v netstat >/dev/null 2>&1 || apt-get update -y && apt-get install -y net-tools >/dev/null
+  command -v netstat >/dev/null 2>&1 || { apt-get update -y >/dev/null; apt-get install -y net-tools >/dev/null; }
   if netstat -tulpen | grep -qE "LISTEN\s+0\s+.*:80\s"; then conflicts="80"; fi
   if netstat -tulpen | grep -qE "LISTEN\s+0\s+.*:443\s"; then conflicts="${conflicts} 443"; fi
 
   if [[ -n "$conflicts" ]]; then
     warn "Порты заняты:${conflicts}"
-    # Пытаемся остановить стандартные веб-сервера
     systemctl stop nginx  >/dev/null 2>&1 || true
     systemctl stop apache2 >/dev/null 2>&1 || true
     sleep 1
@@ -74,9 +73,8 @@ install_deps() {
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") \
-      $(. /etc/os-release; echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list >/dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") $(. /etc/os-release; echo "$VERSION_CODENAME") stable" \
+      | tee /etc/apt/sources.list.d/docker.list >/dev/null
     apt-get update -y >/dev/null
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
     systemctl enable docker >/dev/null; systemctl start docker >/dev/null
@@ -96,27 +94,17 @@ read_nonempty() {
   done
 }
 
-is_domain() {
-  [[ "$1" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
-}
-
-is_email() {
-  [[ "$1" =~ ^[^@]+@[^@]+\.[^@]+$ ]]
-}
+is_domain() { [[ "$1" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; }
+is_email()  { [[ "$1" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; }
 
 rand_alnum() {
-  # length as $1, default 32
   local len="${1:-32}"
   tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
 }
 
-escape_for_env() {
-  # escape '$' for docker-compose env interpolation in basicauth hashes
-  sed 's/\$/$$/g'
-}
+escape_for_env() { sed 's/\$/$$/g'; }
 
 upsert_env() {
-  # upsert KEY=VALUE into .env (no duplicates)
   local key="$1"; shift
   local value="$*"
   if grep -qE "^${key}=" .env 2>/dev/null; then
@@ -222,7 +210,6 @@ generate_secrets() {
   upsert_env POSTGRES_IMAGE "pgvector/pgvector:pg16"
   upsert_env POSTGRES_DB "n8n"
   upsert_env POSTGRES_USER "n8n"
-
   if ! grep -q "^POSTGRES_PASSWORD=" .env; then upsert_env POSTGRES_PASSWORD "$(rand_alnum 32)"; fi
 
   # Redis password (if queue later), generate anyway
@@ -231,16 +218,21 @@ generate_secrets() {
   # n8n encryption key (critical, don't overwrite)
   if ! grep -q "^N8N_ENCRYPTION_KEY=" .env; then upsert_env N8N_ENCRYPTION_KEY "$(rand_alnum 32)"; fi
 
-  # EXECUTIONS_MODE
+  # EXECUTIONS_MODE + main process flag
   case "$INSTALL_MODE" in
-    queue) upsert_env EXECUTIONS_MODE "queue";;
-    *)     upsert_env EXECUTIONS_MODE "regular";;
+    queue)
+      upsert_env EXECUTIONS_MODE "queue"
+      upsert_env N8N_DISABLE_PRODUCTION_MAIN_PROCESS "true"
+      ;;
+    *)
+      upsert_env EXECUTIONS_MODE "regular"
+      upsert_env N8N_DISABLE_PRODUCTION_MAIN_PROCESS "false"
+      ;;
   esac
 
   # Traefik BasicAuth (bcrypt)
-  # Generate only once; do not overwrite on rerun
-  local ta_user ta_pass ta_hash ta_hash_escaped
   if ! grep -q "^TRAEFIK_BASIC_AUTH_USER=" .env; then
+    local ta_user ta_pass ta_hash ta_hash_escaped
     ta_user="admin"
     ta_pass="$(rand_alnum 24)"
     ta_hash="$(htpasswd -nbB "$ta_user" "$ta_pass" | cut -d: -f2-)"
@@ -250,13 +242,13 @@ generate_secrets() {
     upsert_env TRAEFIK_BASIC_AUTH_USERS "$ta_hash_escaped"
   fi
 
-  # tidy line endings
   sed -i 's/\r$//' .env
   ok ".env создан/обновлён"
 }
 
 # ---------- Compose & Configs ----------
 write_traefik_static() {
+  # Минимальная статическая конфигурация; ACME задаём через command в compose
   cat > "${TRAEFIK_DIR}/traefik.yml" <<'YAML'
 entryPoints:
   web:
@@ -270,13 +262,6 @@ api:
 providers:
   docker:
     exposedByDefault: false
-
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: "${ACME_EMAIL}"
-      storage: "/letsencrypt/acme.json"
-      tlsChallenge: {}
 YAML
 }
 
@@ -367,12 +352,11 @@ services:
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - EXECUTIONS_MODE=${EXECUTIONS_MODE}
-      # Queue mode Redis settings (harmless if unused)
+      - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=${N8N_DISABLE_PRODUCTION_MAIN_PROCESS}
+      # Queue mode Redis settings (не заденут regular)
       - QUEUE_BULL_REDIS_HOST=redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
-      # Optional: disable main execs in queue mode (worker does the jobs)
-      - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=true
     volumes:
       - n8n_data:/home/node/.n8n
     labels:
@@ -459,9 +443,11 @@ bring_up() {
 }
 
 ensure_pgvector_enabled() {
-  # На случай повторного запуска без первичной инициализации — убедимся, что расширение есть
   info "Проверяем расширение pgvector..."
-  docker compose exec -T postgres psql -U "$(grep ^POSTGRES_USER= .env | cut -d= -f2)" -d "$(grep ^POSTGRES_DB= .env | cut -d= -f2)" -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1 || true
+  local DBU DBN
+  DBU="$(grep ^POSTGRES_USER= .env | cut -d= -f2)"
+  DBN="$(grep ^POSTGRES_DB= .env | cut -d= -f2)"
+  docker compose exec -T postgres psql -U "$DBU" -d "$DBN" -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1 || true
   ok "pgvector доступен"
 }
 
@@ -501,7 +487,7 @@ mkdir -p "$BK_DIR"
 source .env
 docker compose exec -T postgres pg_dump -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" > "${BK_DIR}/postgres_${POSTGRES_DB}.sql"
 echo "Postgres dump saved to ${BK_DIR}/postgres_${POSTGRES_DB}.sql"
-# Qdrant storage (cold copy) — остановите qdrant для консистентной копии при больших данных
+# Qdrant storage (cold copy) — при больших данных остановите qdrant для консистентности
 tar -czf "${BK_DIR}/qdrant_storage.tgz" -C ./volumes qdrant
 echo "Qdrant storage archived to ${BK_DIR}/qdrant_storage.tgz"
 SH
@@ -511,12 +497,120 @@ SH
 # MEDIA WORKS — n8n + RAG Stack
 
 ## Адреса
-- n8n: `https://${N8N_HOST}`
-- Qdrant UI: `https://${QDRANT_HOST}/dashboard`
-- Traefik Dashboard: `https://${TRAEFIK_HOST}` (BasicAuth)
+- n8n: https://${N8N_HOST}
+- Qdrant UI: https://${QDRANT_HOST}/dashboard
+- Traefik Dashboard: https://${TRAEFIK_HOST} (BasicAuth)
 
 ## Управление
-```bash
-./manage.sh start|stop|restart|logs [service]
+~~~bash
+./manage.sh start
+./manage.sh stop
+./manage.sh restart
+./manage.sh logs n8n
 ./update.sh
 ./backup.sh
+~~~
+
+## Конфигурация
+- `.env` — домены, секреты, переменные n8n/DB/Redis/Traefik
+- `docker-compose.yml` — единый compose с profiles:
+  - `rag` — включает qdrant
+  - `queue` — включает redis и n8n-worker (и qdrant)
+- `configs/traefik/traefik.yml` — статическая конфигурация Traefik
+- `volumes/*` — данные Postgres, Qdrant, сертификаты LE
+
+## Примечания
+- SSL: сертификаты Let's Encrypt выпускаются Traefik в фоне (файл `volumes/traefik/letsencrypt/acme.json`).
+- n8n: при первом входе создайте пользователя-администратора.
+- pgvector: расширение `vector` установлено (`CREATE EXTENSION IF NOT EXISTS vector;`).
+- Для RAG рекомендуем при создании коллекций Qdrant использовать хранение векторов на диске (`on_disk=True`).
+MD
+}
+
+write_credentials() {
+  local cred="${PROJECT_DIR}/credentials.txt"
+  backup_if_exists "$cred"
+  cat > "$cred" <<CREDS
+# MEDIA WORKS — Сгенерированные данные (сохраните в безопасном месте)
+
+# Домены:
+ROOT_DOMAIN=${ROOT_DOMAIN}
+N8N_HOST=${N8N_HOST}
+QDRANT_HOST=${QDRANT_HOST}
+TRAEFIK_HOST=${TRAEFIK_HOST}
+ACME_EMAIL=${ACME_EMAIL}
+INSTALL_MODE=${INSTALL_MODE}
+COMPOSE_PROFILES=${COMPOSE_PROFILES}
+
+# n8n:
+N8N_ENCRYPTION_KEY=$(grep ^N8N_ENCRYPTION_KEY= "${PROJECT_DIR}/.env" | cut -d= -f2)
+
+# Postgres:
+POSTGRES_IMAGE=$(grep ^POSTGRES_IMAGE= "${PROJECT_DIR}/.env" | cut -d= -f2)
+POSTGRES_DB=$(grep ^POSTGRES_DB= "${PROJECT_DIR}/.env" | cut -d= -f2)
+POSTGRES_USER=$(grep ^POSTGRES_USER= "${PROJECT_DIR}/.env" | cut -d= -f2)
+POSTGRES_PASSWORD=$(grep ^POSTGRES_PASSWORD= "${PROJECT_DIR}/.env" | cut -d= -f2)
+
+# Redis:
+REDIS_PASSWORD=$(grep ^REDIS_PASSWORD= "${PROJECT_DIR}/.env" | cut -d= -f2)
+
+# Traefik BasicAuth:
+TRAEFIK_BASIC_AUTH_USER=$(grep ^TRAEFIK_BASIC_AUTH_USER= "${PROJECT_DIR}/.env" | cut -d= -f2)
+TRAEFIK_BASIC_AUTH_PASS=$(grep ^TRAEFIK_BASIC_AUTH_PASS= "${PROJECT_DIR}/.env" | cut -d= -f2)
+
+CREDS
+  chmod 600 "$cred" || true
+}
+
+# ---------- Final output ----------
+final_notes() {
+  echo
+  echo "════════════════════════════════════════════════════════"
+  echo -e "  ${GREEN}Установка завершена успешно!${NC}"
+  echo "════════════════════════════════════════════════════════"
+  echo "Проект:     ${PROJECT_DIR}"
+  echo "Compose:    ${PROJECT_DIR}/docker-compose.yml"
+  echo "Env:        ${PROJECT_DIR}/.env"
+  echo "Creds:      ${PROJECT_DIR}/credentials.txt"
+  echo
+  echo "URL сервисов:"
+  echo "  n8n:            https://${N8N_HOST}/"
+  [[ "$INSTALL_MODE" != "only" ]] && echo "  Qdrant (UI):    https://${QDRANT_HOST}/dashboard"
+  echo "  Traefik:        https://${TRAEFIK_HOST}/"
+  echo
+  echo "Проверьте:"
+  echo "  • DNS записи указывают на IP сервера (n8n, qdrant, traefik)."
+  echo "  • Порты 80/443 открыты (файрвол/облако)."
+  echo "  • Логи Traefik (ACME):   docker compose -f ${PROJECT_DIR}/docker-compose.yml logs traefik"
+  echo
+  echo "Управление:"
+  echo "  cd ${PROJECT_DIR}"
+  echo "  ./manage.sh start|stop|restart|logs [service]"
+  echo "  ./update.sh"
+  echo "  ./backup.sh"
+  echo
+  echo "Контакты MEDIA WORKS — поддержка и донастройка: support@mworks.ru"
+  echo
+}
+
+# ---------- Main ----------
+main() {
+  banner
+  require_root
+  check_os
+  check_ports
+  install_deps
+  prepare_dirs
+  collect_inputs
+  generate_secrets
+  write_traefik_static
+  write_pg_init_vector
+  write_compose
+  bring_up
+  ensure_pgvector_enabled
+  write_helpers
+  write_credentials
+  final_notes
+}
+
+main "$@"
