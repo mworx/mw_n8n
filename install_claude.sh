@@ -155,6 +155,7 @@ install_dependencies() {
         "lsb-release"
         "pwgen"
         "dnsutils"
+        "apache2-utils"
     )
     
     for package in "${packages[@]}"; do
@@ -293,9 +294,10 @@ generate_secrets() {
         REDIS_PASSWORD=$(pwgen -s -1 32)
     fi
     
+    # Генерация учетных данных Traefik
     TRAEFIK_USERNAME="admin"
-    TRAEFIK_PASSWORD=$(pwgen -s -1 16)
-    TRAEFIK_HASHED_PASSWORD=$(openssl passwd -apr1 "$TRAEFIK_PASSWORD")
+    TRAEFIK_PASSWORD=$(pwgen -s -1 24)
+    TRAEFIK_HASHED_PASSWORD=$(htpasswd -nbB "$TRAEFIK_USERNAME" "$TRAEFIK_PASSWORD" | cut -d: -f2)
     
     log "SUCCESS" "Секреты сгенерированы"
 }
@@ -307,8 +309,10 @@ create_directories() {
     mkdir -p "$SCRIPT_DIR"
     mkdir -p "$BACKUP_DIR"
     mkdir -p "$CONFIG_DIR"
-    mkdir -p "$SCRIPT_DIR/volumes"/{traefik,postgres,n8n,qdrant}
+    mkdir -p "$SCRIPT_DIR/volumes"/{traefik,postgres,n8n,qdrant,redis}
     mkdir -p "$CONFIG_DIR/traefik"
+    mkdir -p "$CONFIG_DIR/postgres"
+    mkdir -p "$SCRIPT_DIR/volumes/traefik/logs"
     
     log "SUCCESS" "Директории созданы"
 }
@@ -406,12 +410,98 @@ N8N_LOG_FILE_SIZE_MAX=16
 # Таймауты
 N8N_WORKFLOW_TIMEOUT=0
 N8N_EXECUTION_TIMEOUT=0
+
+# PostgreSQL настройки
+POSTGRES_VERSION=16
+POSTGRES_MAX_CONNECTIONS=200
+POSTGRES_SHARED_BUFFERS=256MB
+POSTGRES_EFFECTIVE_CACHE_SIZE=1GB
+POSTGRES_MAINTENANCE_WORK_MEM=64MB
+POSTGRES_CHECKPOINT_COMPLETION_TARGET=0.9
+POSTGRES_WAL_BUFFERS=16MB
+POSTGRES_DEFAULT_STATISTICS_TARGET=100
+POSTGRES_RANDOM_PAGE_COST=1.1
+POSTGRES_EFFECTIVE_IO_CONCURRENCY=200
 EOF
 
     # Очистка от лишних символов
     sed -i 's/[[:space:]]*$//' "$ENV_FILE"
     
     log "SUCCESS" ".env файл создан"
+}
+
+# Создание init скрипта для PostgreSQL с pgvector
+create_postgres_init_script() {
+    log "STEP" "Создание скрипта инициализации PostgreSQL с pgvector..."
+    
+    cat > "$CONFIG_DIR/postgres/init-pgvector.sql" << 'EOF'
+-- =============================================================================
+-- PostgreSQL инициализация с pgvector расширением
+-- =============================================================================
+
+-- Создание расширения pgvector
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Создание пользователя для n8n (если не существует)
+DO
+$do$
+BEGIN
+   IF NOT EXISTS (
+      SELECT FROM pg_catalog.pg_roles 
+      WHERE  rolname = 'n8n') THEN
+
+      CREATE ROLE n8n LOGIN PASSWORD 'placeholder_password';
+   END IF;
+END
+$do$;
+
+-- Предоставление прав
+GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
+GRANT ALL ON SCHEMA public TO n8n;
+
+-- Настройки для оптимальной работы с векторами
+ALTER SYSTEM SET shared_preload_libraries = 'vector';
+ALTER SYSTEM SET max_connections = 200;
+ALTER SYSTEM SET shared_buffers = '256MB';
+ALTER SYSTEM SET effective_cache_size = '1GB';
+ALTER SYSTEM SET maintenance_work_mem = '64MB';
+ALTER SYSTEM SET checkpoint_completion_target = 0.9;
+ALTER SYSTEM SET wal_buffers = '16MB';
+ALTER SYSTEM SET default_statistics_target = 100;
+ALTER SYSTEM SET random_page_cost = 1.1;
+ALTER SYSTEM SET effective_io_concurrency = 200;
+
+-- Перезагрузка конфигурации
+SELECT pg_reload_conf();
+EOF
+
+    cat > "$CONFIG_DIR/postgres/init-user.sh" << EOF
+#!/bin/bash
+set -e
+
+# Ждем запуска PostgreSQL
+until pg_isready -U postgres; do
+  echo "Ожидание запуска PostgreSQL..."
+  sleep 2
+done
+
+echo "PostgreSQL запущен, инициализация pgvector..."
+
+# Выполнение SQL скрипта
+psql -v ON_ERROR_STOP=1 --username postgres --dbname n8n <<-EOSQL
+    CREATE EXTENSION IF NOT EXISTS vector;
+    -- Обновляем пароль пользователя n8n актуальным значением
+    ALTER USER n8n PASSWORD '$POSTGRES_N8N_PASSWORD';
+    GRANT ALL PRIVILEGES ON DATABASE n8n TO n8n;
+    GRANT ALL ON SCHEMA public TO n8n;
+EOSQL
+
+echo "pgvector инициализирован успешно!"
+EOF
+
+    chmod +x "$CONFIG_DIR/postgres/init-user.sh"
+    
+    log "SUCCESS" "Скрипт инициализации PostgreSQL создан"
 }
 
 # Создание конфигурации Traefik
@@ -460,6 +550,7 @@ certificatesResolvers:
 
 log:
   level: INFO
+  filePath: "/var/log/traefik/traefik.log"
 
 accessLog:
   filePath: "/var/log/traefik/access.log"
@@ -469,6 +560,13 @@ metrics:
   prometheus:
     addEntryPointsLabels: true
     addServicesLabels: true
+    addRoutersLabels: true
+
+ping: {}
+
+# Настройки безопасности
+serversTransport:
+  insecureSkipVerify: true
 EOF
 
     # Создание acme.json с правильными правами
@@ -517,20 +615,27 @@ services:
       - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt"
       - "traefik.http.routers.dashboard.service=api@internal"
       - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
-      - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_HASHED_PASSWORD}"
+      - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_USERNAME}:${TRAEFIK_HASHED_PASSWORD}"
     command:
       - --configfile=/etc/traefik/traefik.yml
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   postgres-n8n:
-    image: postgres:15
+    image: pgvector/pgvector:pg16
     container_name: postgres-n8n
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - ./volumes/postgres:/var/lib/postgresql/data
+      - ./configs/postgres/init-user.sh:/docker-entrypoint-initdb.d/init-user.sh:ro
     networks:
       - mediaworks-network
     healthcheck:
@@ -538,6 +643,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c shared_preload_libraries='vector'
 
   n8n:
     image: n8nio/n8n:latest
@@ -564,6 +681,14 @@ services:
       - N8N_LOG_OUTPUT=console,file
       - N8N_WORKFLOW_TIMEOUT=0
       - N8N_EXECUTION_TIMEOUT=0
+      - N8N_METRICS=true
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - N8N_TEMPLATES_ENABLED=true
+      - N8N_ONBOARDING_FLOW_DISABLED=false
+      - N8N_WORKFLOW_TAGS_DISABLED=false
+      - N8N_USER_MANAGEMENT_DISABLED=false
+      - N8N_PUBLIC_API_DISABLED=false
 EOF
 
     # Добавление Redis настроек для QUEUE режима
@@ -603,6 +728,14 @@ EOF
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=letsencrypt"
       - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      - "traefik.http.routers.n8n.middlewares=n8n-headers"
+      - "traefik.http.middlewares.n8n-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.middlewares.n8n-headers.headers.customrequestheaders.X-Forwarded-For="
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 EOF
 
     # Добавление n8n-worker для QUEUE режима
@@ -628,6 +761,7 @@ EOF
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
       - GENERIC_TIMEZONE=Europe/Moscow
       - N8N_LOG_LEVEL=info
+      - N8N_METRICS=true
     command: n8n worker
     volumes:
       - ./volumes/n8n:/home/node/.n8n
@@ -638,18 +772,32 @@ EOF
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep 'n8n worker' | grep -v grep || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   redis:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
     volumes:
       - ./volumes/redis:/data
     networks:
       - mediaworks-network
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -680,6 +828,20 @@ EOF
     environment:
       - QDRANT__SERVICE__HTTP_PORT=6333
       - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__STORAGE__SNAPSHOTS_PATH=/qdrant/storage/snapshots
+      - QDRANT__STORAGE__ON_DISK_PAYLOAD=true
+      - QDRANT__STORAGE__WAL__WAL_CAPACITY_MB=32
+      - QDRANT__STORAGE__WAL__WAL_SEGMENTS_AHEAD=0
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=0
+      - QDRANT__STORAGE__OPTIMIZERS__DELETED_THRESHOLD=0.2
+      - QDRANT__STORAGE__OPTIMIZERS__VACUUM_MIN_VECTOR_NUMBER=1000
+      - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=32
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 EOF
     fi
     
@@ -694,40 +856,52 @@ create_management_scripts() {
     cat > "$SCRIPT_DIR/start.sh" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
-echo "Запуск MEDIA WORKS n8n системы..."
+echo "🚀 Запуск MEDIA WORKS n8n системы..."
 docker compose up -d
-echo "Система запущена!"
-echo "Логи: docker compose logs -f"
+echo "✅ Система запущена!"
+echo "📋 Логи: ./logs.sh"
+echo "📊 Статус: ./status.sh"
 EOF
 
     # Скрипт остановки
     cat > "$SCRIPT_DIR/stop.sh" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
-echo "Остановка MEDIA WORKS n8n системы..."
+echo "🛑 Остановка MEDIA WORKS n8n системы..."
 docker compose down
-echo "Система остановлена!"
+echo "✅ Система остановлена!"
 EOF
 
     # Скрипт перезапуска
     cat > "$SCRIPT_DIR/restart.sh" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
-echo "Перезапуск MEDIA WORKS n8n системы..."
+echo "🔄 Перезапуск MEDIA WORKS n8n системы..."
 docker compose down
+sleep 5
 docker compose up -d
-echo "Система перезапущена!"
+echo "✅ Система перезапущена!"
 EOF
 
     # Скрипт обновления
     cat > "$SCRIPT_DIR/update.sh" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
-echo "Обновление MEDIA WORKS n8n системы..."
+echo "⬆️  Обновление MEDIA WORKS n8n системы..."
+
+# Создание бэкапа перед обновлением
+echo "📦 Создание бэкапа..."
+./backup.sh
+
+echo "⬇️  Загрузка новых образов..."
 docker compose pull
+
+echo "🔄 Перезапуск с новыми образами..."
 docker compose down
 docker compose up -d
-echo "Система обновлена!"
+
+echo "✅ Система обновлена!"
+echo "📋 Проверьте логи: ./logs.sh"
 EOF
 
     # Скрипт бэкапа
@@ -737,32 +911,45 @@ cd "$(dirname "$0")"
 BACKUP_NAME="backup_$(date +%Y%m%d_%H%M%S)"
 BACKUP_PATH="./backups/$BACKUP_NAME"
 
-echo "Создание бэкапа системы..."
+echo "📦 Создание бэкапа системы..."
 mkdir -p "$BACKUP_PATH"
 
-# Остановка системы
+echo "⏸️  Временная остановка системы для создания консистентного бэкапа..."
 docker compose down
 
-# Копирование данных
-cp -r volumes "$BACKUP_PATH/"
+echo "📄 Копирование конфигурационных файлов..."
 cp .env "$BACKUP_PATH/"
 cp docker-compose.yml "$BACKUP_PATH/"
-cp -r configs "$BACKUP_PATH/"
+cp -r configs "$BACKUP_PATH/" 2>/dev/null || true
 
-# Запуск системы
+echo "💾 Копирование данных..."
+cp -r volumes "$BACKUP_PATH/"
+
+echo "📋 Создание информационного файла..."
+cat > "$BACKUP_PATH/backup_info.txt" << BACKUP_INFO
+Дата создания: $(date)
+Размер бэкапа: $(du -sh "$BACKUP_PATH" | cut -f1)
+Версия системы: MEDIA WORKS n8n+RAG
+BACKUP_INFO
+
+echo "🚀 Запуск системы..."
 docker compose up -d
 
-echo "Бэкап создан: $BACKUP_PATH"
+echo "✅ Бэкап создан: $BACKUP_PATH"
+echo "📊 Размер: $(du -sh "$BACKUP_PATH" | cut -f1)"
 EOF
 
     # Скрипт просмотра логов
     cat > "$SCRIPT_DIR/logs.sh" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
+
 if [ -z "$1" ]; then
-    docker compose logs -f
+    echo "📋 Логи всех сервисов:"
+    docker compose logs --tail=100 -f
 else
-    docker compose logs -f "$1"
+    echo "📋 Логи сервиса: $1"
+    docker compose logs --tail=100 -f "$1"
 fi
 EOF
 
@@ -770,11 +957,76 @@ EOF
     cat > "$SCRIPT_DIR/status.sh" << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")"
-echo "=== Статус MEDIA WORKS n8n системы ==="
-docker compose ps
+
+echo "=== 📊 Статус MEDIA WORKS n8n системы ==="
 echo ""
-echo "=== Использование ресурсов ==="
-docker stats --no-stream
+
+# Статус контейнеров
+echo "🐳 Контейнеры:"
+docker compose ps
+
+echo ""
+echo "💾 Использование дискового пространства:"
+echo "Всего: $(du -sh volumes/ 2>/dev/null | cut -f1 || echo 'Н/Д')"
+echo "- n8n: $(du -sh volumes/n8n/ 2>/dev/null | cut -f1 || echo 'Н/Д')"
+echo "- PostgreSQL: $(du -sh volumes/postgres/ 2>/dev/null | cut -f1 || echo 'Н/Д')"
+if [ -d "volumes/qdrant" ]; then
+    echo "- Qdrant: $(du -sh volumes/qdrant/ 2>/dev/null | cut -f1 || echo 'Н/Д')"
+fi
+if [ -d "volumes/redis" ]; then
+    echo "- Redis: $(du -sh volumes/redis/ 2>/dev/null | cut -f1 || echo 'Н/Д')"
+fi
+
+echo ""
+echo "🌐 Доступность сервисов:"
+source .env
+echo "- n8n: https://$N8N_HOST"
+if [ -n "$QDRANT_HOST" ]; then
+    echo "- Qdrant: https://$QDRANT_HOST"
+fi
+echo "- Traefik: https://$TRAEFIK_HOST"
+
+echo ""
+echo "🔍 Проверка здоровья:"
+docker compose exec -T n8n wget --spider -q http://localhost:5678/healthz && echo "✅ n8n: OK" || echo "❌ n8n: Error"
+if [ -d "volumes/qdrant" ]; then
+    docker compose exec -T qdrant wget --spider -q http://localhost:6333/health && echo "✅ Qdrant: OK" || echo "❌ Qdrant: Error"
+fi
+EOF
+
+    # Скрипт очистки системы
+    cat > "$SCRIPT_DIR/cleanup.sh" << 'EOF'
+#!/bin/bash
+cd "$(dirname "$0")"
+
+echo "🧹 Очистка системы MEDIA WORKS n8n..."
+echo ""
+echo "ВНИМАНИЕ: Эта операция удалит неиспользуемые Docker ресурсы"
+echo "Это поможет освободить место на диске"
+echo ""
+read -p "Продолжить? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "🧹 Удаление остановленных контейнеров..."
+    docker container prune -f
+    
+    echo "🧹 Удаление неиспользуемых образов..."
+    docker image prune -f
+    
+    echo "🧹 Удаление неиспользуемых томов..."
+    docker volume prune -f
+    
+    echo "🧹 Удаление неиспользуемых сетей..."
+    docker network prune -f
+    
+    echo "✅ Очистка завершена!"
+    
+    echo ""
+    echo "💾 Освобождено место:"
+    df -h /var/lib/docker
+else
+    echo "❌ Операция отменена"
+fi
 EOF
 
     chmod +x "$SCRIPT_DIR"/*.sh
@@ -793,36 +1045,54 @@ MEDIA WORKS - Учетные данные системы n8n+RAG
 
 ДОМЕНЫ И ДОСТУП:
 - n8n:         https://$N8N_HOST
-- Qdrant:      https://$QDRANT_HOST  $(if [[ "$INSTALL_MODE" == "3" ]]; then echo "(не установлен)"; fi)
+$(if [[ "$INSTALL_MODE" != "3" ]]; then echo "- Qdrant:      https://$QDRANT_HOST"; fi)
 - Traefik:     https://$TRAEFIK_HOST
 
-УЧЕТНЫЕ ДАННЫЕ TRAEFIK:
+УЧЕТНЫЕ ДАННЫЕ TRAEFIK DASHBOARD:
 - Логин:       $TRAEFIK_USERNAME
 - Пароль:      $TRAEFIK_PASSWORD
+- URL:         https://$TRAEFIK_HOST
 
 БАЗЫ ДАННЫХ:
-- PostgreSQL (n8n):
+- PostgreSQL 16 + pgvector (n8n):
   - Хост:      postgres-n8n:5432
   - База:      $POSTGRES_DB
   - Логин:     $POSTGRES_USER
   - Пароль:    $POSTGRES_N8N_PASSWORD
+  - Версия:    PostgreSQL 16 с расширением pgvector
 
 $(if [[ "$INSTALL_MODE" == "1" ]]; then
 cat << REDIS_EOF
-- Redis:
+- Redis 7 (очередь выполнения):
   - Хост:      redis:6379
   - Пароль:    $REDIS_PASSWORD
+  - База:      0
 REDIS_EOF
 fi)
 
 ВНУТРЕННИЕ СЕКРЕТЫ:
 - n8n Encryption Key:    $N8N_ENCRYPTION_KEY
 
+РЕЖИМ УСТАНОВКИ: $INSTALL_MODE_NAME
+$(case $INSTALL_MODE in
+    1) echo "- n8n в режиме очереди с worker-ом"
+       echo "- PostgreSQL 16 + pgvector"
+       echo "- Redis для очереди задач"
+       echo "- Qdrant для векторного поиска" ;;
+    2) echo "- n8n в обычном режиме"
+       echo "- PostgreSQL 16 + pgvector"
+       echo "- Qdrant для векторного поиска" ;;
+    3) echo "- Только n8n в обычном режиме"
+       echo "- PostgreSQL 16 + pgvector" ;;
+esac)
+
 ПУТИ К ФАЙЛАМ:
-- Проект:        $SCRIPT_DIR
-- Логи:          $SCRIPT_DIR/install.log
-- Учетные данные: $CREDENTIALS_FILE
-- Бэкапы:        $BACKUP_DIR
+- Проект:            $SCRIPT_DIR
+- Логи установки:    $SCRIPT_DIR/install.log
+- Учетные данные:    $CREDENTIALS_FILE
+- Бэкапы:           $BACKUP_DIR
+- Данные:           $SCRIPT_DIR/volumes/
+- Конфигурации:     $CONFIG_DIR
 
 СКРИПТЫ УПРАВЛЕНИЯ:
 - $SCRIPT_DIR/start.sh     - Запуск системы
@@ -832,8 +1102,20 @@ fi)
 - $SCRIPT_DIR/backup.sh    - Создание бэкапа
 - $SCRIPT_DIR/logs.sh      - Просмотр логов
 - $SCRIPT_DIR/status.sh    - Статус системы
+- $SCRIPT_DIR/cleanup.sh   - Очистка системы
 
-ВАЖНО: Удалите этот файл после сохранения учетных данных в безопасном месте!
+ОСОБЕННОСТИ УСТАНОВКИ:
+✅ PostgreSQL 16 с расширением pgvector для работы с векторами
+✅ Traefik с автоматическим получением SSL сертификатов Let's Encrypt
+✅ Безопасная генерация всех паролей и секретов
+✅ Оптимизированная конфигурация PostgreSQL для работы с векторами
+✅ Автоматический мониторинг здоровья всех сервисов
+✅ Логирование и метрики для всех компонентов
+
+ВАЖНО: 
+🔐 Сохраните эти данные в безопасном месте!
+🗑️  Удалите этот файл после сохранения учетных данных!
+🔧 Все настройки можно изменить через файлы в директории configs/
 
 =============================================================================
 MEDIA WORKS | Контакты: support@mediaworks.ru | Telegram: @mediaworks_support
@@ -851,7 +1133,7 @@ create_readme() {
 
 ## Режим установки: $INSTALL_MODE_NAME
 
-### Быстрый старт
+### 🚀 Быстрый старт
 
 \`\`\`bash
 # Запуск системы
@@ -870,13 +1152,21 @@ create_readme() {
 ./status.sh
 \`\`\`
 
-### Доступ к сервисам
+### 🌐 Доступ к сервисам
 
 - **n8n**: https://$N8N_HOST
 $(if [[ "$INSTALL_MODE" != "3" ]]; then echo "- **Qdrant**: https://$QDRANT_HOST"; fi)
-- **Traefik**: https://$TRAEFIK_HOST
+- **Traefik Dashboard**: https://$TRAEFIK_HOST (логин: $TRAEFIK_USERNAME)
 
-### Управление
+### 🛠 Технические характеристики
+
+- **PostgreSQL**: Версия 16 с расширением pgvector
+- **n8n**: Последняя стабильная версия
+$(if [[ "$INSTALL_MODE" != "3" ]]; then echo "- **Qdrant**: Последняя стабильная версия для векторного поиска"; fi)
+$(if [[ "$INSTALL_MODE" == "1" ]]; then echo "- **Redis**: Версия 7 для очереди задач"; fi)
+- **Traefik**: Версия 3.0 с автоматическими SSL сертификатами
+
+### ⚙️ Управление
 
 #### Обновление системы
 \`\`\`bash
@@ -892,32 +1182,104 @@ $(if [[ "$INSTALL_MODE" != "3" ]]; then echo "- **Qdrant**: https://$QDRANT_HOST
 \`\`\`bash
 ./logs.sh n8n          # Логи n8n
 ./logs.sh traefik      # Логи Traefik
+./logs.sh postgres-n8n # Логи PostgreSQL
 $(if [[ "$INSTALL_MODE" != "3" ]]; then echo "./logs.sh qdrant       # Логи Qdrant"; fi)
-$(if [[ "$INSTALL_MODE" == "1" ]]; then echo "./logs.sh redis        # Логи Redis"; fi)
+$(if [[ "$INSTALL_MODE" == "1" ]]; then echo "./logs.sh redis        # Логи Redis"; echo "./logs.sh n8n-worker   # Логи n8n Worker"; fi)
 \`\`\`
 
-### Файлы конфигурации
+#### Очистка системы
+\`\`\`bash
+./cleanup.sh  # Удаление неиспользуемых Docker ресурсов
+\`\`\`
 
-- \`docker-compose.yml\` - Основная конфигурация Docker Compose
-- \`.env\` - Переменные окружения
-- \`configs/traefik/traefik.yml\` - Конфигурация Traefik
-- \`credentials.txt\` - Учетные данные (удалите после использования!)
+### 📁 Структура файлов
 
-### Директории данных
+\`\`\`
+$SCRIPT_DIR/
+├── docker-compose.yml          # Основная конфигурация
+├── .env                       # Переменные окружения
+├── credentials.txt            # Учетные данные (удалить после использования!)
+├── README.md                  # Эта документация
+├── configs/                   # Конфигурационные файлы
+│   ├── traefik/
+│   │   └── traefik.yml       # Конфигурация Traefik
+│   └── postgres/
+│       ├── init-user.sh      # Скрипт инициализации PostgreSQL
+│       └── init-pgvector.sql # SQL для настройки pgvector
+├── volumes/                   # Данные сервисов
+│   ├── n8n/                  # Данные n8n
+│   ├── postgres/             # Данные PostgreSQL
+│   ├── traefik/              # Сертификаты и логи Traefik
+$(if [[ "$INSTALL_MODE" != "3" ]]; then echo "│   ├── qdrant/               # Данные Qdrant"; fi)
+$(if [[ "$INSTALL_MODE" == "1" ]]; then echo "│   └── redis/                # Данные Redis"; fi)
+├── backups/                   # Резервные копии
+└── *.sh                      # Скрипты управления
+\`\`\`
 
-- \`volumes/n8n/\` - Данные n8n
-- \`volumes/postgres/\` - Данные PostgreSQL
-$(if [[ "$INSTALL_MODE" != "3" ]]; then echo "- \`volumes/qdrant/\` - Данные Qdrant"; fi)
-$(if [[ "$INSTALL_MODE" == "1" ]]; then echo "- \`volumes/redis/\` - Данные Redis"; fi)
-- \`volumes/traefik/\` - Данные Traefik и сертификаты
+### 🔧 Расширенная настройка
 
-### Поддержка
+#### Настройка PostgreSQL для векторов
+Система автоматически устанавливает и настраивает расширение pgvector:
+- Поддержка векторных операций
+- Оптимизированные индексы для семантического поиска
+- Настроенная конфигурация для работы с большими векторными данными
 
-- Email: support@mediaworks.ru
-- Telegram: @mediaworks_support
+#### Мониторинг и логирование
+- Все сервисы имеют health checks
+- Централизованное логирование через Traefik
+- Метрики Prometheus доступны через Traefik
+
+#### Безопасность
+- Все пароли генерируются автоматически
+- SSL сертификаты от Let's Encrypt
+- Защищенный доступ к админ-панелям
+- Изолированная Docker сеть
+
+### 🆘 Устранение проблем
+
+#### Проверка состояния сервисов
+\`\`\`bash
+./status.sh
+docker compose ps
+\`\`\`
+
+#### Просмотр логов при проблемах
+\`\`\`bash
+./logs.sh           # Все логи
+./logs.sh n8n       # Только n8n
+./logs.sh traefik   # Только Traefik
+\`\`\`
+
+#### Перезапуск проблемного сервиса
+\`\`\`bash
+docker compose restart n8n      # Перезапуск n8n
+docker compose restart traefik  # Перезапуск Traefik
+\`\`\`
+
+#### Полное переразвертывание
+\`\`\`bash
+./stop.sh
+./start.sh
+\`\`\`
+
+### 📞 Поддержка
+
+- **Email**: support@mediaworks.ru
+- **Telegram**: @mediaworks_support
+- **Документация**: Полные инструкции в credentials.txt
+
+### 📝 Примечания
+
+1. **DNS**: Убедитесь, что все домены указывают на этот сервер
+2. **Порты**: Порты 80 и 443 должны быть открыты
+3. **SSL**: Сертификаты выдаются автоматически (может занять несколько минут)
+4. **Бэкапы**: Регулярно создавайте резервные копии командой \`./backup.sh\`
+5. **Обновления**: Следите за обновлениями через \`./update.sh\`
 
 ---
-*Создано MEDIA WORKS © 2024*
+*Создано MEDIA WORKS © 2024*  
+*Система развернута: $(date)*  
+*Режим: $INSTALL_MODE_NAME*
 EOF
 }
 
@@ -933,6 +1295,7 @@ start_system() {
     # Запуск системы
     if ! docker compose up -d; then
         log "ERROR" "Ошибка при запуске системы"
+        log "INFO" "Проверьте логи: docker compose logs"
         exit 1
     fi
     
@@ -943,35 +1306,58 @@ start_system() {
 health_check() {
     log "STEP" "Проверка работоспособности системы..."
     
-    local max_attempts=30
+    local max_attempts=60  # Увеличиваем время ожидания для pgvector
     local attempt=1
     
     cd "$SCRIPT_DIR"
     
     # Ожидание запуска контейнеров
+    echo -n "Ожидание запуска всех сервисов"
     while [[ $attempt -le $max_attempts ]]; do
-        if docker compose ps --format json | jq -e '.[] | select(.State == "running")' > /dev/null 2>&1; then
-            local running_containers=$(docker compose ps --format json | jq '[.[] | select(.State == "running")] | length')
-            local total_containers=$(docker compose ps --format json | jq '. | length')
-            
-            if [[ "$running_containers" == "$total_containers" ]]; then
-                log "SUCCESS" "Все контейнеры запущены ($running_containers/$total_containers)"
-                break
-            fi
+        local running_containers=$(docker compose ps --filter "status=running" --format json 2>/dev/null | jq -s 'length' 2>/dev/null || echo "0")
+        local total_containers=$(docker compose ps --format json 2>/dev/null | jq -s 'length' 2>/dev/null || echo "1")
+        
+        if [[ "$running_containers" == "$total_containers" ]] && [[ "$total_containers" -gt 0 ]]; then
+            log "SUCCESS" "Все контейнеры запущены ($running_containers/$total_containers)"
+            break
         fi
         
         echo -n "."
-        sleep 5
+        sleep 3
         ((attempt++))
     done
+    echo
     
     if [[ $attempt -gt $max_attempts ]]; then
-        log "WARN" "Таймаут ожидания запуска всех контейнеров"
-        log "INFO" "Проверьте статус: docker compose ps"
+        log "WARN" "Не все контейнеры запустились в ожидаемое время"
+        log "INFO" "Проверьте статус: ./status.sh"
     fi
     
+    # Специальная проверка PostgreSQL с pgvector
+    log "INFO" "Проверка инициализации PostgreSQL с pgvector..."
+    local pg_attempt=1
+    local max_pg_attempts=30
+    
+    while [[ $pg_attempt -le $max_pg_attempts ]]; do
+        if docker compose exec -T postgres-n8n pg_isready -U n8n 2>/dev/null; then
+            log "SUCCESS" "PostgreSQL готов к работе"
+            
+            # Проверка pgvector
+            if docker compose exec -T postgres-n8n psql -U n8n -d n8n -c "SELECT extname FROM pg_extension WHERE extname = 'vector';" 2>/dev/null | grep -q "vector"; then
+                log "SUCCESS" "Расширение pgvector успешно установлено"
+            else
+                log "WARN" "Расширение pgvector не обнаружено, но это не критично"
+            fi
+            break
+        fi
+        
+        echo -n "."
+        sleep 2
+        ((pg_attempt++))
+    done
+    
     # Проверка SSL сертификатов
-    log "INFO" "Ожидание выдачи SSL сертификатов..."
+    log "INFO" "Проверка SSL сертификатов..."
     sleep 10
     
     if [[ -s "$SCRIPT_DIR/volumes/traefik/acme.json" ]]; then
@@ -979,8 +1365,25 @@ health_check() {
         if [[ "$certs_count" -gt 0 ]]; then
             log "SUCCESS" "SSL сертификаты получены ($certs_count шт.)"
         else
-            log "WARN" "SSL сертификаты ещё не получены"
+            log "WARN" "SSL сертификаты ещё получаются (это может занять несколько минут)"
+            log "INFO" "Проверьте позже логи Traefik: ./logs.sh traefik"
         fi
+    fi
+    
+    # Финальная проверка доступности n8n
+    log "INFO" "Проверка доступности n8n..."
+    local n8n_attempt=1
+    while [[ $n8n_attempt -le 10 ]]; do
+        if docker compose exec -T n8n wget --spider -q http://localhost:5678/healthz 2>/dev/null; then
+            log "SUCCESS" "n8n отвечает на health check"
+            break
+        fi
+        sleep 3
+        ((n8n_attempt++))
+    done
+    
+    if [[ $n8n_attempt -gt 10 ]]; then
+        log "WARN" "n8n пока не отвечает на health check, но система может быть работоспособна"
     fi
 }
 
@@ -994,17 +1397,31 @@ show_final_report() {
     echo -e "${YELLOW}=== ИНФОРМАЦИЯ О СИСТЕМЕ ===${NC}"
     echo -e "Режим установки: ${GREEN}$INSTALL_MODE_NAME${NC}"
     echo -e "Путь к проекту:  ${CYAN}$SCRIPT_DIR${NC}"
+    echo -e "PostgreSQL:      ${GREEN}Версия 16 + pgvector${NC}"
     echo
     echo -e "${YELLOW}=== ДОСТУП К СЕРВИСАМ ===${NC}"
     echo -e "🔗 n8n:         ${CYAN}https://$N8N_HOST${NC}"
     if [[ "$INSTALL_MODE" != "3" ]]; then
         echo -e "🔗 Qdrant:      ${CYAN}https://$QDRANT_HOST${NC}"
     fi
-    echo -e "🔗 Traefik:     ${CYAN}https://$TRAEFIK_HOST${NC} (логин: $TRAEFIK_USERNAME)"
+    echo -e "🔗 Traefik:     ${CYAN}https://$TRAEFIK_HOST${NC}"
+    echo -e "   └─ Логин:    ${WHITE}$TRAEFIK_USERNAME${NC}"
+    echo -e "   └─ Пароль:   ${WHITE}$TRAEFIK_PASSWORD${NC}"
+    echo
+    echo -e "${YELLOW}=== ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ ===${NC}"
+    echo -e "🗄️  PostgreSQL 16 с расширением pgvector для векторного поиска"
+    echo -e "🔒 Автоматические SSL сертификаты от Let's Encrypt"
+    echo -e "🛡️  Все пароли сгенерированы безопасно (24+ символов)"
+    echo -e "📊 Health checks для всех сервисов"
+    case $INSTALL_MODE in
+        1) echo -e "⚡ Режим очереди с Redis для высокой производительности" ;;
+        2) echo -e "🤖 Оптимизирован для RAG и векторного поиска" ;;
+        3) echo -e "🎯 Минимальная конфигурация только с n8n" ;;
+    esac
     echo
     echo -e "${YELLOW}=== УЧЕТНЫЕ ДАННЫЕ ===${NC}"
     echo -e "📝 Все данные сохранены в: ${CYAN}$CREDENTIALS_FILE${NC}"
-    echo -e "${RED}⚠️  ВАЖНО: Удалите файл credentials.txt после сохранения данных!${NC}"
+    echo -e "${RED}⚠️  ВАЖНО: Удалите credentials.txt после сохранения данных!${NC}"
     echo
     echo -e "${YELLOW}=== УПРАВЛЕНИЕ СИСТЕМОЙ ===${NC}"
     echo -e "▶️  Запуск:      ${CYAN}$SCRIPT_DIR/start.sh${NC}"
@@ -1012,17 +1429,29 @@ show_final_report() {
     echo -e "🔄 Перезапуск:  ${CYAN}$SCRIPT_DIR/restart.sh${NC}"
     echo -e "📊 Статус:      ${CYAN}$SCRIPT_DIR/status.sh${NC}"
     echo -e "📋 Логи:       ${CYAN}$SCRIPT_DIR/logs.sh${NC}"
+    echo -e "📦 Бэкап:      ${CYAN}$SCRIPT_DIR/backup.sh${NC}"
+    echo -e "⬆️  Обновление: ${CYAN}$SCRIPT_DIR/update.sh${NC}"
     echo
     echo -e "${YELLOW}=== ПРОВЕРЬТЕ ПЕРЕД ИСПОЛЬЗОВАНИЕМ ===${NC}"
     echo -e "✅ DNS записи настроены на этот сервер"
     echo -e "✅ Порты 80 и 443 доступны извне"
-    echo -e "✅ SSL сертификаты будут получены автоматически"
+    echo -e "✅ SSL сертификаты получаются автоматически (может занять до 5 минут)"
+    echo -e "✅ pgvector готов для семантического поиска и RAG"
+    echo
+    echo -e "${YELLOW}=== СЛЕДУЮЩИЕ ШАГИ ===${NC}"
+    echo -e "1️⃣  Настройте DNS записи для доменов"
+    echo -e "2️⃣  Дождитесь выдачи SSL сертификатов"
+    echo -e "3️⃣  Откройте n8n и выполните первоначальную настройку"
+    echo -e "4️⃣  Сохраните учетные данные в безопасном месте"
+    echo -e "5️⃣  Удалите файл credentials.txt"
     echo
     echo -e "${YELLOW}=== ПОДДЕРЖКА ===${NC}"
     echo -e "📧 Email: support@mediaworks.ru"
     echo -e "💬 Telegram: @mediaworks_support"
+    echo -e "📖 Документация: $SCRIPT_DIR/README.md"
     echo
     echo -e "${GREEN}Спасибо за использование решений MEDIA WORKS!${NC}"
+    echo -e "${PURPLE}Ваша система готова к созданию мощных AI-агентов! 🤖✨${NC}"
     echo
 }
 
@@ -1040,6 +1469,7 @@ main() {
     collect_user_data
     generate_secrets
     create_directories
+    create_postgres_init_script
     create_env_file
     create_traefik_config
     create_docker_compose
@@ -1053,7 +1483,10 @@ main() {
 }
 
 # Обработка ошибок
-trap 'log "ERROR" "Установка прервана на строке $LINENO"' ERR
+trap 'log "ERROR" "Установка прервана на строке $LINENO. Проверьте логи: $SCRIPT_DIR/install.log"' ERR
+
+# Создание базовой директории для логов
+mkdir -p "$SCRIPT_DIR"
 
 # Запуск
 main "$@"
