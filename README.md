@@ -1,4 +1,1 @@
-curl -fsSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install.sh | sudo bash
-
-
-curl -sSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install.sh -o install.sh && bash install.sh
+```curl -sSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install.sh -o install.sh && bash install.sh```
