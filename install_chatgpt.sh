@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo -e "\n[ ERROR ] Скрипт прервался на строке $LINENO: $BASH_COMMAND" >&2' ERR
+[[ ${DEBUG:-0} == 1 ]] && set -x
 
 # ================================
 # MEDIA WORKS — n8n + RAG Installer
@@ -44,7 +46,10 @@ check_os() {
 
 check_ports() {
   local conflicts=""
-  command -v netstat >/dev/null 2>&1 || { apt-get update -y >/dev/null; apt-get install -y net-tools >/dev/null; }
+  if ! command -v netstat >/dev/null 2>&1; then
+    apt-get update -y >/dev/null
+    apt-get install -y net-tools >/dev/null
+  fi
   if netstat -tulpen | grep -qE "LISTEN\s+0\s+.*:80\s"; then conflicts="80"; fi
   if netstat -tulpen | grep -qE "LISTEN\s+0\s+.*:443\s"; then conflicts="${conflicts} 443"; fi
 
@@ -71,7 +76,7 @@ install_deps() {
   if ! command -v docker >/dev/null 2>&1; then
     info "Устанавливаем Docker Engine..."
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL "https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") $(. /etc/os-release; echo "$VERSION_CODENAME") stable" \
       | tee /etc/apt/sources.list.d/docker.list >/dev/null
@@ -99,7 +104,7 @@ is_email()  { [[ "$1" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; }
 
 rand_alnum() {
   local len="${1:-32}"
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len"
+  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len" || true
 }
 
 escape_for_env() { sed 's/\$/$$/g'; }
@@ -116,7 +121,9 @@ upsert_env() {
 
 backup_if_exists() {
   local f="$1"
-  [[ -f "$f" ]] && cp -f "$f" "${f}.bak_$(date +%Y%m%d_%H%M%S)"
+  if [ -f "$f" ]; then
+    cp -f "$f" "${f}.bak_$(date +%Y%m%d_%H%M%S)"
+  fi
 }
 
 # ---------- Paths ----------
@@ -127,9 +134,10 @@ VOL_DIR="${PROJECT_DIR}/volumes"
 INITDB_DIR="${PROJECT_DIR}/initdb"
 
 prepare_dirs() {
-  mkdir -p "$PROJECT_DIR" "$CONF_DIR" "$TRAEFIK_DIR" "$VOL_DIR/traefik/letsencrypt" "$VOL_DIR/postgres" "$VOL_DIR/qdrant" "$INITDB_DIR"
+  mkdir -p "$PROJECT_DIR" "$CONF_DIR" "$TRAEFIK_DIR" "$VOL_DIR/traefik/letsencrypt" "$VOL_DIR/postgres" "$VOL_DIR/qdrant" "$VOL_DIR/n8n" "$INITDB_DIR"
   touch "$VOL_DIR/traefik/letsencrypt/acme.json"
   chmod 600 "$VOL_DIR/traefik/letsencrypt/acme.json"
+  chown -R 1000:1000 "$PROJECT_DIR/volumes/"
 }
 
 # ---------- Interactive ----------
@@ -197,13 +205,15 @@ generate_secrets() {
   upsert_env INSTALL_MODE "$INSTALL_MODE"
   upsert_env COMPOSE_PROFILES "$COMPOSE_PROFILES"
 
-  # n8n URLs
+  # n8n URLs & flags
   upsert_env N8N_EDITOR_BASE_URL "https://${N8N_HOST}"
   upsert_env WEBHOOK_URL "https://${N8N_HOST}"
   upsert_env N8N_PROTOCOL "http"
   upsert_env N8N_PORT "5678"
   upsert_env N8N_HOST_BIND "0.0.0.0"
   upsert_env N8N_DIAGNOSTICS_ENABLED "false"
+  upsert_env N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS "true"
+  upsert_env N8N_RUNNERS_ENABLED "true"
   upsert_env GENERIC_TIMEZONE "Europe/Berlin"
 
   # DB defaults
@@ -212,7 +222,7 @@ generate_secrets() {
   upsert_env POSTGRES_USER "n8n"
   if ! grep -q "^POSTGRES_PASSWORD=" .env; then upsert_env POSTGRES_PASSWORD "$(rand_alnum 32)"; fi
 
-  # Redis password (if queue later), generate anyway
+  # Redis password (always present)
   if ! grep -q "^REDIS_PASSWORD=" .env; then upsert_env REDIS_PASSWORD "$(rand_alnum 32)"; fi
 
   # n8n encryption key (critical, don't overwrite)
@@ -230,16 +240,22 @@ generate_secrets() {
       ;;
   esac
 
-  # Traefik BasicAuth (bcrypt)
+  # Traefik BasicAuth (bcrypt or apr1 fallback)
   if ! grep -q "^TRAEFIK_BASIC_AUTH_USER=" .env; then
-    local ta_user ta_pass ta_hash ta_hash_escaped
+    local ta_user ta_pass ta_hash ta_entry ta_entry_escaped
     ta_user="admin"
     ta_pass="$(rand_alnum 24)"
-    ta_hash="$(htpasswd -nbB "$ta_user" "$ta_pass" | cut -d: -f2-)"
-    ta_hash_escaped="$(echo "${ta_user}:${ta_hash}" | escape_for_env)"
+    if command -v htpasswd >/dev/null 2>&1; then
+      ta_hash="$(htpasswd -nbB "$ta_user" "$ta_pass" | cut -d: -f2-)"
+      ta_entry="${ta_user}:${ta_hash}"
+    else
+      ta_hash="$(openssl passwd -apr1 "$ta_pass")"
+      ta_entry="${ta_user}:${ta_hash}"
+    fi
+    ta_entry_escaped="$(printf '%s' "$ta_entry" | escape_for_env)"
     upsert_env TRAEFIK_BASIC_AUTH_USER "$ta_user"
     upsert_env TRAEFIK_BASIC_AUTH_PASS "$ta_pass"
-    upsert_env TRAEFIK_BASIC_AUTH_USERS "$ta_hash_escaped"
+    upsert_env TRAEFIK_BASIC_AUTH_USERS "$ta_entry_escaped"
   fi
 
   sed -i 's/\r$//' .env
@@ -248,7 +264,7 @@ generate_secrets() {
 
 # ---------- Compose & Configs ----------
 write_traefik_static() {
-  # Минимальная статическая конфигурация; ACME задаём через command в compose
+  # Статическая конфигурация Traefik + ACME резолвер "letsencrypt" через httpChallenge (порт 80)
   cat > "${TRAEFIK_DIR}/traefik.yml" <<'YAML'
 entryPoints:
   web:
@@ -262,6 +278,14 @@ api:
 providers:
   docker:
     exposedByDefault: false
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "${ACME_EMAIL}"
+      storage: "/letsencrypt/acme.json"
+      httpChallenge:
+        entryPoint: web
 YAML
 }
 
@@ -276,22 +300,11 @@ write_compose() {
   local f="${PROJECT_DIR}/docker-compose.yml"
   backup_if_exists "$f"
   cat > "$f" <<'YAML'
-version: "3.9"
-
 services:
   traefik:
     image: traefik:2.11
     container_name: traefik
     restart: unless-stopped
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
-      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-      - --api.dashboard=true
     ports:
       - "80:80"
       - "443:443"
@@ -344,6 +357,8 @@ services:
       - WEBHOOK_URL=${WEBHOOK_URL}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - N8N_DIAGNOSTICS_ENABLED=${N8N_DIAGNOSTICS_ENABLED}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
+      - N8N_RUNNERS_ENABLED=${N8N_RUNNERS_ENABLED}
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
@@ -358,7 +373,7 @@ services:
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_PASSWORD=${REDIS_PASSWORD}
     volumes:
-      - n8n_data:/home/node/.n8n
+      - ./volumes/n8n:/home/node/.n8n
     labels:
       - traefik.enable=true
       - traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)
@@ -536,7 +551,7 @@ write_credentials() {
 # Домены:
 ROOT_DOMAIN=${ROOT_DOMAIN}
 N8N_HOST=${N8N_HOST}
-QDRANT_HOST=${QDRANT_HOST}
+QDRANT_HOST=${QDRANT_HOST}/dashboard/
 TRAEFIK_HOST=${TRAEFIK_HOST}
 ACME_EMAIL=${ACME_EMAIL}
 INSTALL_MODE=${INSTALL_MODE}
