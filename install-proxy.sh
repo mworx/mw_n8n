@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS для Claude Code и Proxy (v2)
+# Установщик MEDIA WORKS для Claude Code и Proxy (v3)
 # Поддержка: Ubuntu, Debian, Astra Linux, CentOS
 # ==============================================================================
 
@@ -10,14 +10,13 @@ C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
 C_BLUE='\033[0;34m'
-C_CYAN='\033[0;36m'
 C_NC='\033[0m' # No Color
 
 # --- Глобальные переменные ---
 PKG_MANAGER=""
 OS_TYPE=""
 PROXY_IP="" # Будет запрошен у пользователя
-PROXY_USER="proxyuser" # Как и договорились, пользователь фиксированный
+PROXY_USER="proxyuser" # Фиксированный пользователь
 PROXYCHAINS_CONF_FILE="" # Путь к конфигу (разный в разных ОС)
 
 # ==============================================================================
@@ -79,6 +78,7 @@ fn_update_system() {
     
     if [ "$PKG_MANAGER" == "apt" ]; then
         apt update || { echo -e "${C_RED}Ошибка: apt update не удался.${C_NC}"; exit 1; }
+        # build-essential больше не нужен для Claude, но может быть полезен для proxychains
         apt install -y curl ca-certificates build-essential || { echo -e "${C_RED}Ошибка: не удалось установить базовые зависимости (apt).${C_NC}"; exit 1; }
     
     elif [ "$PKG_MANAGER" == "yum" ]; then
@@ -89,35 +89,26 @@ fn_update_system() {
     echo -e "${C_GREEN}Система обновлена.${C_NC}"
 }
 
-# --- Установка Node.js и Claude ---
-fn_install_node_claude() {
-    echo -e "${C_YELLOW}--- 2A. Установка Node.js (v20 LTS) ---${C_NC}"
+# --- Установка Claude Code (Нативный метод) ---
+fn_install_claude() {
+    echo -e "${C_YELLOW}--- 2A. Установка Claude Code (Native Install) ---${C_NC}"
     
-    if command -v node &> /dev/null && [[ $(node -v | cut -d'v' -f2 | cut -d'.' -f1) -ge 20 ]]; then
-        echo "Node.js (v20+) уже установлен. Пропускаем."
+    if command -v claude &> /dev/null; then
+        echo "Claude CLI уже установлен. Пропускаем."
     else
-        # Скрипт NodeSource сам определяет apt/yum
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || { echo -e "${C_RED}Ошибка: не удалось выполнить скрипт NodeSource.${C_NC}"; exit 1; }
-        
-        if [ "$PKG_MANAGER" == "apt" ]; then
-             apt install -y nodejs || { echo -e "${C_RED}Ошибка: не удалось установить Node.js (apt).${C_NC}"; exit 1; }
-        elif [ "$PKG_MANAGER" == "yum" ]; then
-             yum install -y nodejs || { echo -e "${C_RED}Ошибка: не удалось установить Node.js (yum).${C_NC}"; exit 1; }
+        echo "Запуск официального установщика: curl -fsSL https://claude.ai/install.sh | bash"
+        if ! curl -fsSL https://claude.ai/install.sh | bash; then
+            echo -e "${C_RED}Ошибка: не удалось установить Claude Code.${C_NC}"
+            echo -e "${C_YELLOW}Возможно, доступ к claude.ai заблокирован?${C_NC}"
+            exit 1
         fi
-        echo -e "${C_GREEN}Node.js v20 установлен.${C_NC}"
+        echo -e "${C_GREEN}Claude Code CLI успешно установлен.${C_NC}"
     fi
-    
-    echo -e "${C_YELLOW}--- 2B. Установка Claude Code CLI ---${C_NC}"
-    if ! npm install -g @anthropics/claude-code; then
-        echo -e "${C_RED}Ошибка: не удалось установить @anthropics/claude-code.${C_NC}"
-        exit 1
-    fi
-    echo -e "${C_GREEN}Claude Code CLI успешно установлен.${C_NC}"
 }
 
 # --- Установка и настройка Proxychains ---
 fn_install_proxychains() {
-    echo -e "${C_YELLOW}--- 2C. Установка Proxychains4 ---${C_NC}"
+    echo -e "${C_YELLOW}--- 2B. Установка Proxychains4 ---${C_NC}"
     
     if [ "$PKG_MANAGER" == "apt" ]; then
         apt install -y proxychains-ng || { echo -e "${C_RED}Ошибка: не удалось установить proxychains-ng (apt).${C_NC}"; exit 1; }
@@ -146,115 +137,4 @@ fn_install_proxychains() {
         exit 1
     fi
 
-    echo "Создаем бэкап: ${PROXYCHAINS_CONF_FILE}.bak"
-    cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak"
-
-    echo "Запись новой конфигурации в $PROXYCHAINS_CONF_FILE..."
-    
-    cat << EOF > "$PROXYCHAINS_CONF_FILE"
-#
-# proxychains.conf  VER 4.x
-# Конфигурация от MEDIA WORKS
-#
-
-# Используем dynamic_chain для большей отказоустойчивости
-dynamic_chain
-
-# Отключаем логирование в консоль
-quiet_mode
-
-# Проксируем DNS-запросы
-proxy_dns
-remote_dns_subnet 224
-tcp_read_time_out 15000
-tcp_connect_time_out 8000
-
-[ProxyList]
-# формат: type ip port [user pass]
-socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
-EOF
-
-    # Убедимся, что пароль не остался в переменных окружения
-    unset PROXY_PASS
-
-    echo -e "${C_GREEN}Proxychains4 успешно установлен и настроен.${C_NC}"
-}
-
-# --- Вывод финальной инструкции ---
-fn_show_instructions() {
-    echo
-    echo -e "${C_GREEN}=================================================${C_NC}"
-    echo -e "${C_GREEN}✅ УСТАНОВКА ЗАВЕРШЕНА ${C_NC}"
-    echo -e "${C_GREEN}=================================================${C_NC}"
-    echo
-    echo "ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ:"
-    echo
-
-    case $CHOICE in
-        1)
-            echo "Вы установили: ${C_YELLOW}Node.js + Claude Code${C_NC}"
-            echo "Запуск Claude: ${C_BLUE}claude \"Ваш запрос\"${C_NC}"
-            echo "(Proxychains не был установлен)"
-            ;;
-        2)
-            echo "Вы установили: ${C_YELLOW}Proxychains4${C_NC}"
-            echo "Конфигурационный файл: $PROXYCHAINS_CONF_FILE"
-            echo "Проверка прокси (должен показать IP $PROXY_IP):"
-            echo -e "   ${C_BLUE}proxychains4 curl https://ifconfig.me${C_NC}"
-            echo "Запуск любой команды: ${C_BLUE}proxychains4 [команда]${C_NC}"
-            echo "(Claude Code не был установлен)"
-            ;;
-        3)
-            echo "Вы установили: ${C_YELLOW}Полный стэк (Claude + Proxy)${C_NC}"
-            echo "Конфигурационный файл: $PROXYCHAINS_CONF_FILE"
-            echo
-            echo "1. Проверка прокси (должен показать IP $PROXY_IP):"
-            echo -e "   ${C_BLUE}proxychains4 curl https://ifconfig.me${C_NC}"
-            echo
-            echo "2. Запуск Claude Code через прокси:"
-            echo -e "   ${C_BLUE}proxychains4 claude \"Ваш запрос\"${C_NC}"
-            ;;
-    esac
-    echo
-    echo "--------------------------------------------------------"
-}
-
-# ==============================================================================
-# ГЛАВНЫЙ СКРИПТ
-# ==============================================================================
-
-fn_check_root
-fn_show_logo
-fn_detect_os_and_pkg_manager
-
-echo "Выберите вариант установки:"
-echo "  1) Только Node.js + Claude Code"
-echo "  2) Только Proxychains4 (с настройками)"
-echo "  3) Полный стэк (Node.js, Claude, Proxychains)"
-echo
-read -p "Ваш выбор [1, 2 или 3]: " CHOICE
-
-case $CHOICE in
-    1)
-        echo "Выбран вариант 1: Claude Code"
-        fn_update_system
-        fn_install_node_claude
-        ;;
-    2)
-        echo "Выбран вариант 2: Proxychains4"
-        fn_update_system
-        fn_install_proxychains
-        ;;
-    3)
-        echo "Выбран вариант 3: Полный стэк"
-        fn_update_system
-        fn_install_node_claude
-        fn_install_proxychains
-        ;;
-    *)
-        echo -e "${C_RED}Неверный выбор. Выход.${C_NC}"
-        exit 1
-        ;;
-esac
-
-fn_show_instructions
+    echo "Создаем бэкап: ${PROXYCHAINS_CONF_FILE
