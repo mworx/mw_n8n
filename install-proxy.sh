@@ -192,7 +192,7 @@ fn_show_instructions() {
 
     case $CHOICE in
         1)
-            echo "Вы установили: ${C_YELLOW}Node.js + Claude Code${C_NC}"
+            echo "Вы установили: ${C_YELLOW}Claude Code (Native)${C_NC}"
             echo "Запуск Claude: ${C_BLUE}claude \"Ваш запрос\"${C_NC}"
             echo "(Proxychains не был установлен)"
             ;;
