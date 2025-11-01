@@ -1,6 +1,6 @@
 Установка n8n:
 
-```curl -sSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install-n8n.sh -o install.sh && bash install.sh```
+```curl -sSL https://raw.githubusercontent.com/mworx/mw_n8n/refs/heads/main/install-n8n.sh -o install-n8n.sh && bash install-n8n.sh```
 
 
 
