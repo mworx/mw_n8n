@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS для Claude Code и Proxy (v3)
+# Установщик MEDIA WORKS для Claude Code и Proxy (v3.1)
 # Поддержка: Ubuntu, Debian, Astra Linux, CentOS
 # ==============================================================================
 
@@ -36,7 +36,7 @@ fn_show_logo() {
     echo "  ╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝     ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝"
     echo "  ═════════════════════════════════════════════════════════════════════════════════════"
     echo "                                  Установщик Claude Code"
-    echo "  ═════════════════════════════════════════════════════════════════════════════════════"
+    echo "  ═════════════════════════════════════════════════════════════════════════════════════${C_NC}"
 }
 
 # --- Проверка на Root ---
@@ -116,8 +116,9 @@ fn_install_proxychains() {
         PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
     
     elif [ "$PKG_MANAGER" == "yum" ]; then
-        yum install -y epel-release || { echo -e "${C_RED}Внимание: не удалось установить epel-release. Попытка продолжить...${C_NC}"; }
-        yum install -y proxychains-ng || { echo -e "${C_RED}Ошибка: не удалось установить proxychains-ng (yum). Убедитесь, что EPEL-репозиторий подключен.${C_NC}"; exit 1; }
+        # ИСПРАВЛЕНО: Прерываем выполнение, если EPEL не удалось установить
+        yum install -y epel-release || { echo -e "${C_RED}Ошибка: не удалось установить epel-release. Proxychains не будет найден.${C_NC}"; exit 1; }
+        yum install -y proxychains-ng || { echo -e "${C_RED}Ошибка: не удалось установить proxychains-ng (yum).${C_NC}"; exit 1; }
         
         # На CentOS/RHEL конфиг часто называется proxychains.conf
         if [ -f /etc/proxychains4.conf ]; then
