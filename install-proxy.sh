@@ -92,7 +92,7 @@ fn_update_system() {
 fn_install_node_claude() {
     echo -e "${C_YELLOW}--- 2A. Установка Node.js (v20 LTS) ---${C_NC}"
     
-    if command -v node &> /dev/null && [[ $(node -v | cut -d'v' -f2 | cut -d'.' -f1) -ge 20 ]]; then
+    if command -v node &> /dev/null && [[ $(node -v | cut -d'v' -f2 | cut -d'.' -f1) -ge 15 ]]; then
         echo "Node.js (v20+) уже установлен. Пропускаем."
     else
         #
