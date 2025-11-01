@@ -93,7 +93,7 @@ fn_install_node_claude() {
     echo -e "${C_YELLOW}--- 2A. Установка Node.js (v20 LTS) ---${C_NC}"
     
     if command -v node &> /dev/null && [[ $(node -v | cut -d'v' -f2 | cut -d'.' -f1) -ge 15 ]]; then
-        echo "Node.js (v20+) уже установлен. Пропускаем."
+        echo "Node.js (v15+) уже установлен. Пропускаем."
     else
         #
         # ===== ИСПРАВЛЕНИЕ 1: Разные скрипты для apt и yum =====
@@ -112,11 +112,8 @@ fn_install_node_claude() {
     fi
     
     echo -e "${C_YELLOW}--- 2B. Установка Claude Code CLI ---${C_NC}"
-    #
-    # ===== ИСПРАВЛЕНИЕ 2: Правильное имя NPM пакета =====
-    #
-    if ! npm install -g @anthropic-ai/cli; then
-        echo -e "${C_RED}Ошибка: не удалось установить @anthropic-ai/cli.${C_NC}"
+    if ! npm install -g @anthropic-ai/claude-code; then
+        echo -e "${C_RED}Ошибка: не удалось установить @anthropic-ai/claude-code.${C_NC}"
         echo -e "${C_YELLOW}Возможно, registry.npmjs.org недоступен без прокси?${C_NC}"
         exit 1
     fi
