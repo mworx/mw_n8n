@@ -138,4 +138,115 @@ fn_install_proxychains() {
         exit 1
     fi
 
-    echo "Создаем бэкап: ${PROXYCHAINS_CONF_FILE
+    echo "Создаем бэкап: ${PROXYCHAINS_CONF_FILE}.bak"
+    cp "$PROXYCHAINS_CONF_FILE" "${PROXYCHAINS_CONF_FILE}.bak"
+
+    echo "Запись новой конфигурации в $PROXYCHAINS_CONF_FILE..."
+    
+    cat << EOF > "$PROXYCHAINS_CONF_FILE"
+#
+# proxychains.conf  VER 4.x
+# Конфигурация от MEDIA WORKS
+#
+
+# Используем dynamic_chain для большей отказоустойчивости
+dynamic_chain
+
+# Отключаем логирование в консоль
+quiet_mode
+
+# Проксируем DNS-запросы
+proxy_dns
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+
+[ProxyList]
+# формат: type ip port [user pass]
+socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
+EOF
+
+    # Убедимся, что пароль не остался в переменных окружения
+    unset PROXY_PASS
+
+    echo -e "${C_GREEN}Proxychains4 успешно установлен и настроен.${C_NC}"
+}
+
+# --- Вывод финальной инструкции ---
+fn_show_instructions() {
+    echo
+    echo -e "${C_GREEN}=================================================${C_NC}"
+    echo -e "${C_GREEN}✅ УСТАНОВКА ЗАВЕРШЕНА ${C_NC}"
+    echo -e "${C_GREEN}=================================================${C_NC}"
+    echo
+    echo "ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ:"
+    echo
+
+    case $CHOICE in
+        1)
+            echo "Вы установили: ${C_YELLOW}Claude Code (Native)${C_NC}"
+            echo "Запуск Claude: ${C_BLUE}claude \"Ваш запрос\"${C_NC}"
+            echo "(Proxychains не был установлен)"
+            ;;
+        2)
+            echo "Вы установили: ${C_YELLOW}Proxychains4${C_NC}"
+            echo "Конфигурационный файл: $PROXYCHAINS_CONF_FILE"
+            echo "Проверка прокси (должен показать IP $PROXY_IP):"
+            echo -e "   ${C_BLUE}proxychains4 curl https://ifconfig.me${C_NC}"
+            echo "Запуск любой команды: ${C_BLUE}proxychains4 [команда]${C_NC}"
+            echo "(Claude Code не был установлен)"
+            ;;
+        3)
+            echo "Вы установили: ${C_YELLOW}Полный стэк (Claude + Proxy)${C_NC}"
+            echo "Конфигурационный файл: $PROXYCHAINS_CONF_FILE"
+            echo
+            echo "1. Проверка прокси (должен показать IP $PROXY_IP):"
+            echo -e "   ${C_BLUE}proxychains4 curl https://ifconfig.me${C_NC}"
+            echo
+            echo "2. Запуск Claude Code через прокси:"
+            echo -e "   ${C_BLUE}proxychains4 claude \"Ваш запрос\"${C_NC}"
+            ;;
+    esac
+    echo
+    echo "--------------------------------------------------------"
+}
+
+# ==============================================================================
+# ГЛАВНЫЙ СКРИПТ
+# ==============================================================================
+
+fn_check_root
+fn_show_logo
+fn_detect_os_and_pkg_manager
+
+echo "Выберите вариант установки:"
+echo "  1) Только Claude Code (Native Install)"
+echo "  2) Только Proxychains4 (с настройками)"
+echo "  3) Полный стэк (Claude, Proxychains)"
+echo
+read -p "Ваш выбор [1, 2 или 3]: " CHOICE
+
+case $CHOICE in
+    1)
+        echo "Выбран вариант 1: Claude Code"
+        fn_update_system
+        fn_install_claude
+        ;;
+    2)
+        echo "Выбран вариант 2: Proxychains4"
+        fn_update_system
+        fn_install_proxychains
+        ;;
+    3)
+        echo "Выбран вариант 3: Полный стэк"
+        fn_update_system
+        fn_install_claude
+        fn_install_proxychains
+        ;;
+    *)
+        echo -e "${C_RED}Неверный выбор. Выход.${C_NC}"
+        exit 1
+        ;;
+esac
+
+fn_show_instructions
