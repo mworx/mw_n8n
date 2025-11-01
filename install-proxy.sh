@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# Установщик MEDIA WORKS для Claude Code и Proxy (v2)
+# Установщик MEDIA WORKS для Claude Code и Proxy (v2.1 - исправлен)
 # Поддержка: Ubuntu, Debian, Astra Linux, CentOS
 # ==============================================================================
 
@@ -17,7 +17,7 @@ C_NC='\033[0m' # No Color
 PKG_MANAGER=""
 OS_TYPE=""
 PROXY_IP="" # Будет запрошен у пользователя
-PROXY_USER="proxyuser" # Как и договорились, пользователь фиксированный
+PROXY_USER="proxyuser" # Фиксированный пользователь
 PROXYCHAINS_CONF_FILE="" # Путь к конфигу (разный в разных ОС)
 
 # ==============================================================================
@@ -36,7 +36,7 @@ fn_show_logo() {
     echo "  ╚═╝     ╚═╝╚══════╝╚═════╝ ╚═╝╚═╝  ╚═╝     ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝"
     echo "  ═════════════════════════════════════════════════════════════════════════════════════"
     echo "                                  Установщик Claude Code"
-    echo "  ═════════════════════════════════════════════════════════════════════════════════════"
+    echo "  ═════════════════════════════════════════════════════════════════════════════════════${C_NC}"
 }
 
 # --- Проверка на Root ---
@@ -82,7 +82,6 @@ fn_update_system() {
         apt install -y curl ca-certificates build-essential || { echo -e "${C_RED}Ошибка: не удалось установить базовые зависимости (apt).${C_NC}"; exit 1; }
     
     elif [ "$PKG_MANAGER" == "yum" ]; then
-        # yum check-update
         yum install -y curl ca-certificates gcc-c++ make || { echo -e "${C_RED}Ошибка: не удалось установить базовые зависимости (yum).${C_NC}"; exit 1; }
     fi
     
@@ -96,23 +95,32 @@ fn_install_node_claude() {
     if command -v node &> /dev/null && [[ $(node -v | cut -d'v' -f2 | cut -d'.' -f1) -ge 20 ]]; then
         echo "Node.js (v20+) уже установлен. Пропускаем."
     else
-        # Скрипт NodeSource сам определяет apt/yum
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || { echo -e "${C_RED}Ошибка: не удалось выполнить скрипт NodeSource.${C_NC}"; exit 1; }
-        
+        #
+        # ===== ИСПРАВЛЕНИЕ 1: Разные скрипты для apt и yum =====
+        #
         if [ "$PKG_MANAGER" == "apt" ]; then
+             echo "Добавление репозитория NodeSource (Debian)..."
+             curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || { echo -e "${C_RED}Ошибка: не удалось выполнить скрипт NodeSource (deb).${C_NC}"; exit 1; }
              apt install -y nodejs || { echo -e "${C_RED}Ошибка: не удалось установить Node.js (apt).${C_NC}"; exit 1; }
+        
         elif [ "$PKG_MANAGER" == "yum" ]; then
+             echo "Добавление репозитория NodeSource (RHEL/CentOS)..."
+             curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - || { echo -e "${C_RED}Ошибка: не удалось выполнить скрипт NodeSource (rpm).${C_NC}"; exit 1; }
              yum install -y nodejs || { echo -e "${C_RED}Ошибка: не удалось установить Node.js (yum).${C_NC}"; exit 1; }
         fi
         echo -e "${C_GREEN}Node.js v20 установлен.${C_NC}"
     fi
     
     echo -e "${C_YELLOW}--- 2B. Установка Claude Code CLI ---${C_NC}"
-    if ! npm install -g @anthropic-ai/claude-code; then
-        echo -e "${C_RED}Ошибка: не удалось установить @anthropic-ai/claude-code.${C_NC}"
+    #
+    # ===== ИСПРАВЛЕНИЕ 2: Правильное имя NPM пакета =====
+    #
+    if ! npm install -g @anthropic-ai/cli; then
+        echo -e "${C_RED}Ошибка: не удалось установить @anthropic-ai/cli.${C_NC}"
+        echo -e "${C_YELLOW}Возможно, registry.npmjs.org недоступен без прокси?${C_NC}"
         exit 1
     fi
-    echo -e "${C_GREEN}Claude Code CLI успешно установлен.${C_NC}"
+    echo -e "${C_GREEN}Claude Code CLI (npm) успешно установлен.${C_NC}"
 }
 
 # --- Установка и настройка Proxychains ---
@@ -124,10 +132,12 @@ fn_install_proxychains() {
         PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
     
     elif [ "$PKG_MANAGER" == "yum" ]; then
-        yum install -y epel-release || { echo -e "${C_RED}Внимание: не удалось установить epel-release. Попытка продолжить...${C_NC}"; }
-        yum install -y proxychains-ng || { echo -e "${C_RED}Ошибка: не удалось установить proxychains-ng (yum). Убедитесь, что EPEL-репозиторий подключен.${C_NC}"; exit 1; }
+        #
+        # ===== ИСПРАВЛЕНИЕ 3: Жесткая ошибка, если EPEL не установлен =====
+        #
+        yum install -y epel-release || { echo -e "${C_RED}Ошибка: не удалось установить epel-release. Proxychains не будет найден.${C_NC}"; exit 1; }
+        yum install -y proxychains-ng || { echo -e "${C_RED}Ошибка: не удалось установить proxychains-ng (yum).${C_NC}"; exit 1; }
         
-        # На CentOS/RHEL конфиг часто называется proxychains.conf
         if [ -f /etc/proxychains4.conf ]; then
             PROXYCHAINS_CONF_FILE="/etc/proxychains4.conf"
         else
@@ -156,27 +166,17 @@ fn_install_proxychains() {
 # proxychains.conf  VER 4.x
 # Конфигурация от MEDIA WORKS
 #
-
-# Используем dynamic_chain для большей отказоустойчивости
 dynamic_chain
-
-# Отключаем логирование в консоль
 quiet_mode
-
-# Проксируем DNS-запросы
 proxy_dns
 remote_dns_subnet 224
 tcp_read_time_out 15000
 tcp_connect_time_out 8000
-
 [ProxyList]
-# формат: type ip port [user pass]
 socks5 $PROXY_IP 1080 $PROXY_USER $PROXY_PASS
 EOF
 
-    # Убедимся, что пароль не остался в переменных окружения
     unset PROXY_PASS
-
     echo -e "${C_GREEN}Proxychains4 успешно установлен и настроен.${C_NC}"
 }
 
@@ -190,15 +190,16 @@ fn_show_instructions() {
     echo "ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ:"
     echo
 
+    #
+    # ===== ИСПРАВЛЕНИЕ 4: Добавлен флаг -e для echo =====
+    #
     case $CHOICE in
         1)
-            # ИСПРАВЛЕНО: Добавлен флаг -e
-            echo -e "Вы установили: ${C_YELLOW}Claude Code (Native)${C_NC}"
+            echo -e "Вы установили: ${C_YELLOW}Node.js + Claude Code${C_NC}"
             echo -e "Запуск Claude: ${C_BLUE}claude \"Ваш запрос\"${C_NC}"
             echo "(Proxychains не был установлен)"
             ;;
         2)
-            # ИСПРАВЛЕНО: Добавлен флаг -e
             echo -e "Вы установили: ${C_YELLOW}Proxychains4${C_NC}"
             echo "Конфигурационный файл: $PROXYCHAINS_CONF_FILE"
             echo "Проверка прокси (должен показать IP $PROXY_IP):"
@@ -207,8 +208,7 @@ fn_show_instructions() {
             echo "(Claude Code не был установлен)"
             ;;
         3)
-            # ИСПРАВЛЕНО: Добавлен флаг -e
-            echo -e "Вы установили: ${C_YELLOW}Полный стэк (Claude + Proxy)${C_NC}"
+            echo -e "Вы установили: ${C_YELLOW}Полный стэк (Node.js + Claude + Proxy)${C_NC}"
             echo "Конфигурационный файл: $PROXYCHAINS_CONF_FILE"
             echo
             echo "1. Проверка прокси (должен показать IP $PROXY_IP):"
