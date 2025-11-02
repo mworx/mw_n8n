@@ -126,8 +126,8 @@ fn_install_node_claude() {
     fi
     
     echo -e "${C_YELLOW}--- 2B. Установка Claude Code CLI ---${C_NC}"
-    if ! $prefix_cmd npm install -g @anthropic-ai/cli; then
-        echo -e "${C_RED}Ошибка: не удалось установить @anthropic-ai/cli.${C_NC}"
+    if ! $prefix_cmd npm install -g @anthropic-ai/claude-code; then
+        echo -e "${C_RED}Ошибка: не удалось установить @anthropic-ai/claude-code.${C_NC}"
         exit 1
     fi
     echo -e "${C_GREEN}Claude Code CLI (npm) успешно установлен.${C_NC}"
