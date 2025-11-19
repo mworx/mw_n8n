@@ -38,17 +38,10 @@ set -euo pipefail
 # Для генерации ключа используйте: ./scripts/generate_ssh_key.sh
 RAG_SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdFEUkt7XiKbo8Z2tDaFSd0lQ+ZF7Rks19RqNhmRPRB rag_server@mw-rag"
 
-# Имя пользователя RAG-системы
 RAG_USER="rag_user"
-
-# SSH порт по умолчанию
 DEFAULT_SSH_PORT=22
-
-# Файл лога
 LOG_FILE="/var/log/rag_client_setup.log"
-
-# Версия скрипта
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.2.0"
 
 ################################################################################
 # ========== ЦВЕТА ДЛЯ ВЫВОДА ==========
@@ -137,124 +130,75 @@ check_root() {
     fi
 }
 
-################################################################################
-# Определение ОС
-################################################################################
 detect_os() {
     log "INFO" "Определение ОС..."
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         case "${ID}" in
             centos|rhel|rocky|almalinux|fedora)
-                DETECTED_OS="RHEL"
                 if command -v dnf &> /dev/null; then PACKAGE_MANAGER="dnf"; else PACKAGE_MANAGER="yum"; fi
-                log "SUCCESS" "ОС: ${NAME} ${VERSION_ID} (RHEL family)"
+                log "SUCCESS" "ОС: ${NAME} (RHEL family)"
                 ;;
             ubuntu|debian)
-                DETECTED_OS="DEBIAN"
                 PACKAGE_MANAGER="apt"
-                log "SUCCESS" "ОС: ${NAME} ${VERSION_ID} (Debian family)"
+                log "SUCCESS" "ОС: ${NAME} (Debian family)"
                 ;;
             *)
-                DETECTED_OS="UNKNOWN"
-                PACKAGE_MANAGER="yum" # Попытка fallback для старых CentOS
-                log "WARNING" "Неизвестная ОС: ${NAME}. Пробуем совместимый режим RHEL."
+                PACKAGE_MANAGER="yum"
+                log "WARNING" "Неизвестная ОС. Пробуем режим RHEL/CentOS."
                 ;;
         esac
     else
-        # Fallback для очень старых систем
-        if command -v yum &> /dev/null; then
-            DETECTED_OS="RHEL"
-            PACKAGE_MANAGER="yum"
-        else
-            DETECTED_OS="DEBIAN"
-            PACKAGE_MANAGER="apt-get"
-        fi
+        # Fallback
+        if command -v yum &> /dev/null; then PACKAGE_MANAGER="yum"; else PACKAGE_MANAGER="apt-get"; fi
     fi
 }
 
-################################################################################
-# Установка зависимостей
-################################################################################
 install_dependencies() {
     log "INFO" "Проверка зависимостей..."
     local pkgs=()
-
     if ! command -v rsync &> /dev/null; then pkgs+=("rsync"); fi
-    
-    # В CentOS 7 sshd может быть частью openssh-server
     if ! command -v sshd &> /dev/null; then pkgs+=("openssh-server"); fi
 
     if [[ ${#pkgs[@]} -gt 0 ]]; then
         log "INFO" "Установка: ${pkgs[*]}"
-        if [[ "${DETECTED_OS}" == "RHEL" ]]; then
-            ${PACKAGE_MANAGER} install -y "${pkgs[@]}" || log "WARNING" "Ошибка установки, пробуем продолжить..."
-        else
+        if [[ "${PACKAGE_MANAGER}" == "apt" || "${PACKAGE_MANAGER}" == "apt-get" ]]; then
             apt-get update -qq && apt-get install -y "${pkgs[@]}"
+        else
+            ${PACKAGE_MANAGER} install -y "${pkgs[@]}"
         fi
-    else
-        log "SUCCESS" "Все зависимости на месте"
     fi
 }
 
-################################################################################
-# Определение группы веб-сервера (BitrixEnv Logic)
-################################################################################
 detect_web_server_group() {
     log "INFO" "Определение группы веб-сервера..."
-
-    # 1. Приоритет: BitrixEnv (группа bitrix)
     if getent group bitrix >/dev/null 2>&1; then
         WEB_SERVER_GROUP="bitrix"
-        log "SUCCESS" "Обнаружена среда BitrixEnv. Используем группу: ${WEB_SERVER_GROUP}"
-        return
-    fi
-
-    # 2. Поиск стандартных групп
-    if getent group www-data >/dev/null 2>&1; then
+        log "SUCCESS" "Обнаружена среда BitrixEnv. Группа: bitrix"
+    elif getent group www-data >/dev/null 2>&1; then
         WEB_SERVER_GROUP="www-data"
     elif getent group apache >/dev/null 2>&1; then
         WEB_SERVER_GROUP="apache"
     elif getent group nginx >/dev/null 2>&1; then
         WEB_SERVER_GROUP="nginx"
     else
-        # 3. Если ничего не нашли - спрашиваем
-        log "WARNING" "Стандартные группы не найдены."
-        echo "Введите название группы веб-сервера (владельца файлов сайта):"
+        echo "Введите группу веб-сервера вручную (например, bitrix):"
         read -p "> " manual_group
-        if getent group "${manual_group}" >/dev/null 2>&1; then
-            WEB_SERVER_GROUP="${manual_group}"
-        else
-            log "ERROR" "Группа ${manual_group} не существует."
-            exit 1
-        fi
+        WEB_SERVER_GROUP="${manual_group}"
     fi
-    log "SUCCESS" "Выбрана группа: ${WEB_SERVER_GROUP}"
 }
 
-################################################################################
-# Путь к Bitrix
-################################################################################
 validate_bitrix_path() {
     local path="$1"
-    
     if [[ -z "${path}" ]]; then
-        # Стандартные пути BitrixEnv и обычных установок
         for p in "/home/bitrix/www" "/var/www/bitrix" "/var/www/html"; do
-            if [[ -d "${p}/bitrix" ]]; then
-                path="${p}"
-                log "SUCCESS" "Найден путь Bitrix: ${path}"
-                break
-            fi
+            if [[ -d "${p}/bitrix" ]]; then path="${p}"; break; fi
         done
     fi
-
     echo ""
     read -p "Подтвердите путь к Bitrix [${path}]: " user_input
     BITRIX_PATH="${user_input:-$path}"
-    
-    # Убираем slash в конце
-    BITRIX_PATH="${BITRIX_PATH%/}"
+    BITRIX_PATH="${BITRIX_PATH%/}" # Удалить slash в конце
 
     if [[ ! -d "${BITRIX_PATH}" ]]; then
         log "ERROR" "Директория ${BITRIX_PATH} не найдена!"
@@ -262,87 +206,75 @@ validate_bitrix_path() {
     fi
 }
 
-################################################################################
-# SSH Порт (Исправленная версия)
-################################################################################
 detect_ssh_port() {
-    log "INFO" "Определение SSH порта..."
-    
-    # Используем || echo "22" чтобы grep не валил скрипт при set -e
     local cfg_port
     cfg_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1 || echo "22")
-    
-    # Если grep вернул пустоту (все порты закомментированы), используем 22
     if [[ -z "${cfg_port}" ]]; then cfg_port="22"; fi
-
-    read -p "Подтвердите SSH порт [${cfg_port}]: " user_port
-    SSH_PORT="${user_port:-$cfg_port}"
-    
-    log "SUCCESS" "Используем порт: ${SSH_PORT}"
+    SSH_PORT="${cfg_port}"
+    log "INFO" "Используем SSH порт: ${SSH_PORT}"
 }
 
-################################################################################
-# Пользователь и SSH
-################################################################################
 setup_user_and_ssh() {
     log "INFO" "Настройка пользователя ${RAG_USER}..."
 
-    # Создание пользователя
+    # 1. Создание пользователя
     if ! id "${RAG_USER}" &>/dev/null; then
-        if [[ "${DETECTED_OS}" == "RHEL" ]]; then
+        if command -v useradd &>/dev/null; then
             useradd --system --shell /bin/bash --create-home "${RAG_USER}"
         else
             adduser --system --group --shell /bin/bash --disabled-password "${RAG_USER}"
         fi
         log "SUCCESS" "Пользователь создан"
-    else
-        log "INFO" "Пользователь уже существует"
     fi
 
-    # Добавление в группу
+    # 2. Добавление в группу
     usermod -a -G "${WEB_SERVER_GROUP}" "${RAG_USER}"
     log "SUCCESS" "Пользователь добавлен в группу ${WEB_SERVER_GROUP}"
 
-    # SSH ключи
+    # 3. Настройка SSH ключей
     local ssh_dir="/home/${RAG_USER}/.ssh"
     mkdir -p "${ssh_dir}"
     chmod 700 "${ssh_dir}"
     
-    # ВАЖНО: rsync restricted shell
-    local cmd="command=\"rsync --server --sender -vlogDtprze.iLsfxCIvu . ${BITRIX_PATH}/\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
+    # ВАЖНО: Убрали command="rsync...", оставили только флаги безопасности
+    local options="no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty"
     
-    echo "${cmd} ${RAG_SSH_PUBLIC_KEY}" > "${ssh_dir}/authorized_keys"
+    echo "${options} ${RAG_SSH_PUBLIC_KEY}" > "${ssh_dir}/authorized_keys"
     chmod 600 "${ssh_dir}/authorized_keys"
-    chown -R "${RAG_USER}:${RAG_USER}" "${ssh_dir}"
+    chown -R "${RAG_USER}:${RAG_USER}" "/home/${RAG_USER}"
     
-    log "SUCCESS" "SSH ключи установлены с ограничением команд"
+    log "SUCCESS" "SSH ключ установлен (без жесткой команды rsync)"
 }
 
-################################################################################
-# Права доступа (Осторожно!)
-################################################################################
 fix_permissions() {
-    log "INFO" "Проверка прав доступа на чтение..."
-    # Мы не делаем chown/chmod -R на всё, это опасно для BitrixEnv
-    # Просто убедимся, что группа может читать (обычно в BitrixEnv это уже так: 775 или 664)
+    log "INFO" "Настройка прав доступа (Bitrix Compatible)..."
     
-    # Простой тест: может ли группа читать index.php
-    if sudo -u "${RAG_USER}" test -r "${BITRIX_PATH}/index.php"; then
-        log "SUCCESS" "Права доступа в порядке (rag_user может читать файлы)"
-    else
-        log "WARNING" "Пользователь не может читать файлы. Пробуем дать права группе g+rX..."
-        # Добавляем права на чтение группе, не меняя владельца
-        chmod -R g+rX "${BITRIX_PATH}/" 2>/dev/null || true
-        log "INFO" "Права обновлены"
+    # 1. Права на саму папку сайта
+    log "INFO" "Даем права группе на чтение сайта: ${BITRIX_PATH}"
+    chmod g+rx "${BITRIX_PATH}" 2>/dev/null || true
+    
+    # 2. Права на родительскую папку (КРИТИЧНО для /home/bitrix)
+    local parent_dir
+    parent_dir=$(dirname "${BITRIX_PATH}")
+    
+    if [[ -d "${parent_dir}" ]]; then
+        log "INFO" "Разрешаем проход через родительскую папку: ${parent_dir}"
+        # g+x позволяет группе проходить сквозь папку, не читая её содержимое
+        chmod g+x "${parent_dir}" 2>/dev/null || true
+    fi
+
+    # 3. Проверка SELinux
+    if command -v getenforce &>/dev/null; then
+        if [[ "$(getenforce)" == "Enforcing" ]]; then
+            log "WARNING" "SELinux включен. Отключаем временно (setenforce 0)..."
+            setenforce 0 || log "ERROR" "Не удалось отключить SELinux"
+            log "INFO" "Рекомендуется отключить SELinux в /etc/selinux/config"
+        fi
     fi
 }
 
-################################################################################
-# Firewall (Firewalld / UFW / Iptables)
-################################################################################
 configure_firewall() {
     log "INFO" "Настройка Firewall..."
-    
     if command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
         if ! firewall-cmd --list-ports | grep -q "${SSH_PORT}/tcp"; then
             firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null
@@ -352,23 +284,18 @@ configure_firewall() {
     elif command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
          ufw allow "${SSH_PORT}/tcp" >/dev/null
          log "SUCCESS" "Порт ${SSH_PORT} открыт (ufw)"
-    else
-        log "INFO" "Firewall не активен или не управляется стандартными утилитами. Пропуск."
     fi
 }
 
-################################################################################
-# Финальный отчет
-################################################################################
 show_summary() {
-    local ip_addr=$(hostname -I | awk '{print $1}')
+    local ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_IP")
     
     echo ""
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  НАСТРОЙКА ЗАВЕРШЕНА!  ${NC}"
-    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  НАСТРОЙКА ЗАВЕРШЕНА УСПЕШНО!  ${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo "Передайте эти данные администратору RAG-системы:"
+    echo "Передайте этот JSON администратору:"
     echo ""
     echo -e "${YELLOW}{"
     echo "  \"client_id\": \"client_XXX\","
@@ -376,7 +303,8 @@ show_summary() {
     echo "  \"ssh_port\": ${SSH_PORT},"
     echo "  \"ssh_user\": \"${RAG_USER}\","
     echo "  \"remote_path\": \"${BITRIX_PATH}/\","
-    echo "  \"enabled\": true"
+    echo "  \"enabled\": true,"
+    echo "  \"include_dirs\": [\"/local/\", \"/bitrix/php_interface/\", \"/bitrix/templates/\"]"
     echo -e "}${NC}"
     echo ""
 }
